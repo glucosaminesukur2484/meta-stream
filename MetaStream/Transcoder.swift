@@ -14,7 +14,7 @@ final class Transcoder: @unchecked Sendable {
 
     func decode(_ sb: CMSampleBuffer) {
         guard let fd = sb.formatDescription else { return }
-        if session == nil || format.map({ !CMFormatDescriptionEqual($0, fd) }) ?? true {
+        if session == nil || format.map({ !CMFormatDescriptionEqual($0, otherFormatDescription: fd) }) ?? true {
             invalidate()
             var s: VTDecompressionSession?
             let attrs: [CFString: Any] = [
