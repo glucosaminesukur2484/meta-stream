@@ -46,6 +46,12 @@
 		<key>TeamID</key>
 		<string>$(TEAM_ID)</string>
 	</dict>
+	<key>KickClientID</key>
+	<string>$(KICK_CLIENT_ID)</string>
+	<key>KickClientSecret</key>
+	<string>$(KICK_CLIENT_SECRET)</string>
+	<key>TwitchClientID</key>
+	<string>$(TWITCH_CLIENT_ID)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

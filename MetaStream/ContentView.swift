@@ -56,6 +56,7 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showChat = false
     @State private var showStatus = false
+    @State private var showManager = false
     @State private var photoFlash = false
 
     private var chatURL: String {
@@ -73,7 +74,8 @@ struct ContentView: View {
                 VStack(spacing: 8) {
                     Image(systemName: "iphone.rear.camera").font(.system(size: 44))
                     Text("Phone camera").font(.headline)
-                    Text("glasses reconnecting…").font(.caption).foregroundStyle(.secondary)
+                    Text(streamer.manualSource == "auto" ? "glasses reconnecting…" : "tap the source pill to switch back")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 .foregroundStyle(.white)
             }
@@ -94,6 +96,7 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .statusBarHidden(false)
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(isPresented: $showManager) { StreamManagerView() }
         .sheet(isPresented: $showChat) {
             chatSheet
                 .presentationDetents([.fraction(0.45), .large])
@@ -130,11 +133,27 @@ struct ContentView: View {
                 } else {
                     pill("antenna.radiowaves.left.and.right", streamer.rtmpState, .gray)
                 }
-                pill(streamer.source == "phone" ? "iphone" : "eyeglasses", streamer.source, streamer.source == "phone" ? .orange : .white)
+                Button { tap(); cycleSource() } label: {
+                    pill(streamer.source == "phone" ? "iphone" : "eyeglasses",
+                         streamer.manualSource == "auto" ? "auto · \(streamer.source)" : streamer.manualSource,
+                         streamer.source == "phone" ? .orange : .white)
+                }
+                .buttonStyle(.plain)
                 if streamer.muted { pill("mic.slash.fill", "muted", .orange) }
+                Button { tap(); showManager = true } label: {
+                    pill("slider.horizontal.3", "manage", .cyan)
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(.top, 4)
+    }
+
+    /// auto → glasses → back → front → auto
+    private func cycleSource() {
+        let order = ["auto", "glasses", "back", "front"]
+        let i = order.firstIndex(of: streamer.manualSource) ?? 0
+        streamer.setSource(order[(i + 1) % order.count])
     }
 
     private var glassesColor: Color {

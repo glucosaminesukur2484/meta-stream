@@ -24,7 +24,8 @@ final class Streamer: ObservableObject {
     @Published var live = false
     @Published var liveSince: Date?
     @Published var devices = "none seen yet"
-    @Published var source = "glasses"          // "glasses" | "phone" (fallback camera while glasses are down)
+    @Published var source = "glasses"          // "glasses" | "phone" (what is actually going out right now)
+    @Published var manualSource = "auto"       // "auto" | "glasses" | "back" | "front" (user's choice)
     @Published var mics: [Mic] = []
     @Published var muted = false
     @Published var lastPhotoAt: Date?
@@ -230,9 +231,25 @@ final class Streamer: ObservableObject {
 
     // MARK: fallback camera (StreamHand-style: glasses drop → phone camera, glasses back → glasses)
 
+    /// "auto" = glasses with automatic phone fallback; "glasses" = force glasses; "back"/"front" = force a phone camera.
+    func setSource(_ s: String) {
+        manualSource = s
+        if s == "back" || s == "front" { fallbackPosition = s == "front" ? .front : .back }
+        evaluateSource()
+    }
+
     private func evaluateSource() {
         fallbackTask?.cancel()
         guard live else { return }
+        switch manualSource {
+        case "back", "front":
+            Task { await switchTo(glasses: false) }     // re-attaching with the other position swaps cameras
+            return
+        case "glasses":
+            if source == "phone" { Task { await switchTo(glasses: true) } }
+            return
+        default: break
+        }
         if glassesStreaming {
             if source == "phone" { Task { await switchTo(glasses: true) } }
         } else if source == "glasses" {

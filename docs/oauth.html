@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>MetaStream login</title>
+<p style="font-family:system-ui;text-align:center;margin-top:20vh">Returning to MetaStream…<br><a id="a" href="#">Tap here if nothing happens</a></p>
+<script>
+  // Kick requires an https redirect; this page just hands the code back to the app's URL scheme.
+  var target = "metastream://oauth/kick" + location.search;
+  document.getElementById("a").href = target;
+  location.replace(target);
+</script>
