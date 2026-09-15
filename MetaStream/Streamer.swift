@@ -428,7 +428,13 @@ final class Streamer: ObservableObject {
         hot.transcoder?.invalidate()
         if h264 {
             let mixer = self.mixer, hot = self.hot
-            hot.transcoder = Transcoder { sb in hot.appended += 1; Task { await mixer.append(sb) } }
+            // Warm-up decodes to get the decoder synced to a keyframe, but nothing reaches the encoder until
+            // publishing: video arriving before the publish handshake completes makes ingests drop the connection.
+            hot.transcoder = Transcoder { sb in
+                guard hot.live else { return }
+                hot.appended += 1
+                Task { await mixer.append(sb) }
+            }
         } else {
             hot.transcoder = nil
         }
@@ -462,7 +468,7 @@ final class Streamer: ObservableObject {
                     // Decode before connecting: an ingest that finds no video in its first seconds of probing
                     // treats the whole session as audio-only. Warm up, then connect with frames already flowing.
                     hot.warm = true
-                    rtmpState = "waiting for keyframe…"
+                    rtmpState = "syncing decoder…"
                     var waited = 0
                     while hot.transcoder?.decoded == 0, waited < 80 { try await Task.sleep(for: .milliseconds(100)); waited += 1 }
                     applog("stream", "decoder warm after \(waited * 100) ms, decoded=\(hot.transcoder?.decoded ?? 0)")
