@@ -4,8 +4,9 @@ import CryptoKit
 import UIKit
 
 struct StreamCategory: Identifiable, Hashable { let id: String; let name: String }
+struct RestreamChannel: Identifiable, Hashable { let id: Int; let name: String; var active: Bool; let url: String }
 
-/// Kick + Twitch accounts: login, channel info (title/category/viewers), chat send, stream key.
+/// Kick, Twitch, Restream, YouTube accounts: login, channel info (title/category/viewers), chat send, stream key.
 /// ponytail: tokens live in UserDefaults; move to Keychain if the phone is shared.
 @MainActor
 final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
@@ -32,23 +33,52 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     @Published var twitchVerifyURL = ""
     private var twitchUserID = ""
 
+    // Restream
+    @Published var restreamUser = ""
+    @Published var restreamChannels: [RestreamChannel] = []
+    @Published var restreamTitle = ""
+    @Published var restreamStreamKey = ""
+    @Published var restreamChatURL = ""
+
+    // YouTube
+    @Published var ytUser = ""
+    @Published var ytTitle = ""
+    @Published var ytLive = false
+    @Published var ytViewers = 0
+    @Published var ytVideoID = ""
+    @Published var ytStreamKey = ""
+    @Published var ytIngest = "rtmps://a.rtmps.youtube.com:443/live2"
+    private var ytLiveChatID = ""
+    private var ytBroadcast: [String: Any] = [:]
+
     private var authSession: ASWebAuthenticationSession?
     private let d = UserDefaults.standard
     private static let info = Bundle.main.infoDictionary ?? [:]
     private static let kickID = info["KickClientID"] as? String ?? ""
     private static let kickSecret = info["KickClientSecret"] as? String ?? ""
     private static let twitchID = info["TwitchClientID"] as? String ?? ""
-    static let kickRedirect = "https://metastream.iamsaeed.dev/oauth.html"   // GitHub Pages (docs/) behind a custom domain
+    private static let restreamID = info["RestreamClientID"] as? String ?? ""
+    private static let restreamSecret = info["RestreamClientSecret"] as? String ?? ""
+    private static let youtubeID = info["YouTubeClientID"] as? String ?? ""
+    static let webRedirect = "https://metastream.iamsaeed.dev/oauth.html"   // GitHub Pages (docs/) → metastream:// scheme
+    static let googleRedirect = "com.saeedkolivand.metastream:/oauth2redirect" // Google iOS clients accept the bundle-id scheme
     static let kickIngest = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     static let twitchIngest = "rtmps://live.twitch.tv:443/app/"
+    static let restreamIngest = "rtmps://live.restream.io:443/live"
 
     var kickConnected: Bool { d.string(forKey: "kickAccess") != nil }
     var twitchConnected: Bool { d.string(forKey: "twitchAccess") != nil }
+    var restreamConnected: Bool { d.string(forKey: "restreamAccess") != nil }
+    var ytConnected: Bool { d.string(forKey: "ytAccess") != nil }
+    static var hasRestreamApp: Bool { !restreamID.isEmpty }
+    static var hasYouTubeApp: Bool { !youtubeID.isEmpty }
 
     override init() {
         super.init()
         if kickConnected { Task { await refreshKick() } }
         if twitchConnected { Task { await refreshTwitch() } }
+        if restreamConnected { Task { await refreshRestream() } }
+        if ytConnected { Task { await refreshYouTube() } }
     }
 
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -57,71 +87,51 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         }
     }
 
-    // MARK: - Kick login (OAuth 2.1 + PKCE, https redirect page → metastream:// scheme)
+    /// Opens the system auth sheet and hands back the `code` query item (nil if cancelled).
+    private func authorize(_ url: URL, scheme: String) async -> String? {
+        await withCheckedContinuation { cont in
+            let s = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { url, _ in
+                let code = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "code" })?.value }
+                cont.resume(returning: code)
+            }
+            s.presentationContextProvider = self
+            authSession = s
+            s.start()
+        }
+    }
+
+    // MARK: - Kick (OAuth 2.1 + PKCE, client secret on token exchange)
 
     func connectKick() {
-        let verifier = Self.random(64)
-        let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64URL
-        var c = URLComponents(string: "https://id.kick.com/oauth/authorize")!
-        c.queryItems = [
-            .init(name: "response_type", value: "code"),
-            .init(name: "client_id", value: Self.kickID),
-            .init(name: "redirect_uri", value: Self.kickRedirect),
-            .init(name: "scope", value: "user:read channel:read channel:write chat:write streamkey:read"),
-            .init(name: "code_challenge", value: challenge),
-            .init(name: "code_challenge_method", value: "S256"),
-            .init(name: "state", value: Self.random(16)),
-        ]
-        status = "Opening Kick login…"
-        let s = ASWebAuthenticationSession(url: c.url!, callbackURLScheme: "metastream") { [weak self] url, error in
-            Task { @MainActor in
-                guard let self else { return }
-                guard let url, let code = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                        .queryItems?.first(where: { $0.name == "code" })?.value else {
-                    self.status = "Kick login cancelled: \(error?.localizedDescription ?? "no code")"
-                    return
-                }
-                await self.exchangeKick(code: code, verifier: verifier)
-            }
+        Task {
+            let verifier = Self.random(64)
+            var c = URLComponents(string: "https://id.kick.com/oauth/authorize")!
+            c.queryItems = [
+                .init(name: "response_type", value: "code"), .init(name: "client_id", value: Self.kickID),
+                .init(name: "redirect_uri", value: Self.webRedirect),
+                .init(name: "scope", value: "user:read channel:read channel:write chat:write streamkey:read"),
+                .init(name: "code_challenge", value: Self.s256(verifier)), .init(name: "code_challenge_method", value: "S256"),
+                .init(name: "state", value: Self.random(16)),
+            ]
+            guard let code = await authorize(c.url!, scheme: "metastream") else { status = "Kick login cancelled"; return }
+            do {
+                let json = try await Self.form("https://id.kick.com/oauth/token", [
+                    "grant_type": "authorization_code", "client_id": Self.kickID, "client_secret": Self.kickSecret,
+                    "redirect_uri": Self.webRedirect, "code_verifier": verifier, "code": code])
+                try saveTokens(json, prefix: "kick")
+                status = "Kick connected"
+                await refreshKick()
+            } catch { status = "Kick token error: \(error.localizedDescription)" }
         }
-        s.presentationContextProvider = self
-        authSession = s
-        s.start()
-    }
-
-    private func exchangeKick(code: String, verifier: String) async {
-        do {
-            let json = try await Self.form("https://id.kick.com/oauth/token", [
-                "grant_type": "authorization_code", "client_id": Self.kickID, "client_secret": Self.kickSecret,
-                "redirect_uri": Self.kickRedirect, "code_verifier": verifier, "code": code])
-            try saveTokens(json, prefix: "kick")
-            status = "Kick connected"
-            await refreshKick()
-        } catch { status = "Kick token error: \(error.localizedDescription)" }
-    }
-
-    private func refreshKickToken() async throws {
-        let json = try await Self.form("https://id.kick.com/oauth/token", [
-            "grant_type": "refresh_token", "client_id": Self.kickID, "client_secret": Self.kickSecret,
-            "refresh_token": d.string(forKey: "kickRefresh") ?? ""])
-        try saveTokens(json, prefix: "kick")
     }
 
     private func kick(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil) async throws -> [String: Any] {
-        var c = URLComponents(string: "https://api.kick.com" + path)!
-        if !query.isEmpty { c.queryItems = query }
-        var req = URLRequest(url: c.url!)
-        req.httpMethod = method
-        req.setValue("Bearer \(d.string(forKey: "kickAccess") ?? "")", forHTTPHeaderField: "Authorization")
-        if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        if code == 401 {                                  // ponytail: one refresh, one retry
-            try await refreshKickToken()
-            return try await kick(method, path, query: query, body: body)
+        try await call(method, "https://api.kick.com" + path, query: query, body: body, tokenKey: "kickAccess") {
+            let json = try await Self.form("https://id.kick.com/oauth/token", [
+                "grant_type": "refresh_token", "client_id": Self.kickID, "client_secret": Self.kickSecret,
+                "refresh_token": self.d.string(forKey: "kickRefresh") ?? ""])
+            try self.saveTokens(json, prefix: "kick")
         }
-        guard (200..<300).contains(code) else { throw Self.err("Kick \(path) → HTTP \(code): \(String(data: data, encoding: .utf8) ?? "")") }
-        return data.isEmpty ? [:] : ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:])
     }
 
     func refreshKick() async {
@@ -167,12 +177,9 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         catch { status = error.localizedDescription }
     }
 
-    func disconnectKick() {
-        ["kickAccess", "kickRefresh"].forEach { d.removeObject(forKey: $0) }
-        kickUser = ""; kickTitle = ""; kickCategory = nil; kickStreamKey = ""
-    }
+    func disconnectKick() { forget("kick"); kickUser = ""; kickTitle = ""; kickCategory = nil; kickStreamKey = "" }
 
-    // MARK: - Twitch login (Device Code Grant, public client, no secret)
+    // MARK: - Twitch (Device Code Grant, public client, no secret)
 
     func connectTwitch() {
         Task {
@@ -204,28 +211,13 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         }
     }
 
-    private func refreshTwitchToken() async throws {
-        let json = try await Self.form("https://id.twitch.tv/oauth2/token", [
-            "grant_type": "refresh_token", "client_id": Self.twitchID, "refresh_token": d.string(forKey: "twitchRefresh") ?? ""])
-        try saveTokens(json, prefix: "twitch")
-    }
-
     private func helix(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil) async throws -> [String: Any] {
-        var c = URLComponents(string: "https://api.twitch.tv/helix" + path)!
-        if !query.isEmpty { c.queryItems = query }
-        var req = URLRequest(url: c.url!)
-        req.httpMethod = method
-        req.setValue("Bearer \(d.string(forKey: "twitchAccess") ?? "")", forHTTPHeaderField: "Authorization")
-        req.setValue(Self.twitchID, forHTTPHeaderField: "Client-Id")
-        if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        if code == 401 {
-            try await refreshTwitchToken()
-            return try await helix(method, path, query: query, body: body)
+        try await call(method, "https://api.twitch.tv/helix" + path, query: query, body: body, tokenKey: "twitchAccess",
+                       headers: ["Client-Id": Self.twitchID]) {
+            let json = try await Self.form("https://id.twitch.tv/oauth2/token", [
+                "grant_type": "refresh_token", "client_id": Self.twitchID, "refresh_token": self.d.string(forKey: "twitchRefresh") ?? ""])
+            try self.saveTokens(json, prefix: "twitch")
         }
-        guard (200..<300).contains(code) else { throw Self.err("Twitch \(path) → HTTP \(code): \(String(data: data, encoding: .utf8) ?? "")") }
-        return data.isEmpty ? [:] : ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:])
     }
 
     func refreshTwitch() async {
@@ -274,12 +266,183 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         catch { status = error.localizedDescription }
     }
 
-    func disconnectTwitch() {
-        ["twitchAccess", "twitchRefresh"].forEach { d.removeObject(forKey: $0) }
-        twitchUser = ""; twitchTitle = ""; twitchCategory = nil; twitchStreamKey = ""
+    func disconnectTwitch() { forget("twitch"); twitchUser = ""; twitchTitle = ""; twitchCategory = nil; twitchStreamKey = "" }
+
+    // MARK: - Restream (OAuth 2 code flow, Basic-auth token exchange, no PKCE offered)
+
+    func connectRestream() {
+        Task {
+            var c = URLComponents(string: "https://api.restream.io/login")!
+            c.queryItems = [
+                .init(name: "response_type", value: "code"), .init(name: "client_id", value: Self.restreamID),
+                .init(name: "redirect_uri", value: Self.webRedirect), .init(name: "state", value: Self.random(16)),
+            ]
+            guard let code = await authorize(c.url!, scheme: "metastream") else { status = "Restream login cancelled"; return }
+            do {
+                let json = try await Self.form("https://api.restream.io/oauth/token",
+                    ["grant_type": "authorization_code", "redirect_uri": Self.webRedirect, "code": code],
+                    basic: (Self.restreamID, Self.restreamSecret))
+                try saveTokens(json, prefix: "restream")
+                status = "Restream connected"
+                await refreshRestream()
+            } catch { status = "Restream token error: \(error.localizedDescription)" }
+        }
     }
 
-    // MARK: - helpers
+    private func restream(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> Any {
+        try await callAny(method, "https://api.restream.io/v2" + path, body: body, tokenKey: "restreamAccess") {
+            let json = try await Self.form("https://api.restream.io/oauth/token",
+                ["grant_type": "refresh_token", "refresh_token": self.d.string(forKey: "restreamRefresh") ?? ""],
+                basic: (Self.restreamID, Self.restreamSecret))
+            try self.saveTokens(json, prefix: "restream")
+        }
+    }
+
+    func refreshRestream() async {
+        do {
+            if let p = try await restream("GET", "/user/profile") as? [String: Any] { restreamUser = p["username"] as? String ?? "" }
+            let list = (try await restream("GET", "/user/channels") as? [[String: Any]]) ?? []
+            restreamChannels = list.compactMap {
+                guard let id = $0["id"] as? Int else { return nil }
+                return RestreamChannel(id: id, name: $0["displayName"] as? String ?? "channel \(id)",
+                                       active: $0["active"] as? Bool ?? true, url: $0["channelUrl"] as? String ?? "")
+            }
+            if let first = restreamChannels.first, let m = try await restream("GET", "/user/channel-meta/\(first.id)") as? [String: Any] {
+                restreamTitle = m["title"] as? String ?? ""
+            }
+            if let k = try await restream("GET", "/user/streamKey") as? [String: Any] { restreamStreamKey = k["streamKey"] as? String ?? "" }
+            if let c = try await restream("GET", "/user/webchat/url") as? [String: Any] { restreamChatURL = c["webchatUrl"] as? String ?? "" }
+            status = "Restream updated"
+        } catch { status = error.localizedDescription }
+    }
+
+    /// One title for every destination Restream fans out to.
+    func restreamApply(title: String) async {
+        do {
+            for ch in restreamChannels { _ = try await restream("PATCH", "/user/channel-meta/\(ch.id)", body: ["title": title]) }
+            status = "Restream titles updated"; await refreshRestream()
+        } catch { status = error.localizedDescription }
+    }
+
+    func restreamSetActive(_ ch: RestreamChannel, _ active: Bool) async {
+        do {
+            _ = try await restream("PATCH", "/user/channel/\(ch.id)", body: ["active": active])
+            if let i = restreamChannels.firstIndex(of: ch) { restreamChannels[i].active = active }
+        } catch { status = error.localizedDescription }
+    }
+
+    func disconnectRestream() { forget("restream"); restreamUser = ""; restreamChannels = []; restreamTitle = ""; restreamStreamKey = ""; restreamChatURL = "" }
+
+    // MARK: - YouTube (Google OAuth for iOS: PKCE, no secret, bundle-id scheme redirect)
+
+    func connectYouTube() {
+        Task {
+            let verifier = Self.random(64)
+            var c = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
+            c.queryItems = [
+                .init(name: "client_id", value: Self.youtubeID), .init(name: "redirect_uri", value: Self.googleRedirect),
+                .init(name: "response_type", value: "code"),
+                .init(name: "scope", value: "https://www.googleapis.com/auth/youtube.force-ssl"),
+                .init(name: "code_challenge", value: Self.s256(verifier)), .init(name: "code_challenge_method", value: "S256"),
+                .init(name: "access_type", value: "offline"), .init(name: "prompt", value: "consent"),
+            ]
+            guard let code = await authorize(c.url!, scheme: "com.saeedkolivand.metastream") else { status = "YouTube login cancelled"; return }
+            do {
+                let json = try await Self.form("https://oauth2.googleapis.com/token", [
+                    "client_id": Self.youtubeID, "code": code, "code_verifier": verifier,
+                    "grant_type": "authorization_code", "redirect_uri": Self.googleRedirect])
+                try saveTokens(json, prefix: "yt")
+                status = "YouTube connected"
+                await refreshYouTube()
+            } catch { status = "YouTube token error: \(error.localizedDescription)" }
+        }
+    }
+
+    private func yt(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil) async throws -> [String: Any] {
+        try await call(method, "https://www.googleapis.com/youtube/v3" + path, query: query, body: body, tokenKey: "ytAccess") {
+            let json = try await Self.form("https://oauth2.googleapis.com/token", [
+                "grant_type": "refresh_token", "client_id": Self.youtubeID, "refresh_token": self.d.string(forKey: "ytRefresh") ?? ""])
+            try self.saveTokens(json, prefix: "yt")
+        }
+    }
+
+    func refreshYouTube() async {
+        do {
+            if let ch = ((try await yt("GET", "/channels", query: [.init(name: "part", value: "snippet"), .init(name: "mine", value: "true")]))["items"] as? [[String: Any]])?.first {
+                ytUser = (ch["snippet"] as? [String: Any])?["title"] as? String ?? ""
+            }
+            let items = (try await yt("GET", "/liveBroadcasts", query: [
+                .init(name: "part", value: "id,snippet,contentDetails,status"), .init(name: "mine", value: "true"), .init(name: "maxResults", value: "10")]))["items"] as? [[String: Any]] ?? []
+            let preferred = ["live", "liveStarting", "testing", "ready", "created"]
+            // The broadcast YouTube Studio calls "your stream": the most alive one, else the newest.
+            let pick = preferred.lazy.compactMap { s in items.first { (($0["status"] as? [String: Any])?["lifeCycleStatus"] as? String) == s } }.first ?? items.first
+            if let b = pick {
+                ytBroadcast = b
+                ytVideoID = b["id"] as? String ?? ""
+                let sn = b["snippet"] as? [String: Any] ?? [:]
+                ytTitle = sn["title"] as? String ?? ""
+                ytLiveChatID = sn["liveChatId"] as? String ?? ""
+                ytLive = ((b["status"] as? [String: Any])?["lifeCycleStatus"] as? String) == "live"
+                if let v = ((try await yt("GET", "/videos", query: [.init(name: "part", value: "liveStreamingDetails"), .init(name: "id", value: ytVideoID)]))["items"] as? [[String: Any]])?.first {
+                    ytViewers = Int((v["liveStreamingDetails"] as? [String: Any])?["concurrentViewers"] as? String ?? "") ?? 0
+                }
+            }
+            if let s = ((try await yt("GET", "/liveStreams", query: [.init(name: "part", value: "cdn"), .init(name: "mine", value: "true")]))["items"] as? [[String: Any]])?.first,
+               let ing = ((s["cdn"] as? [String: Any])?["ingestionInfo"] as? [String: Any]) {
+                ytStreamKey = ing["streamName"] as? String ?? ""
+                if let a = ing["rtmpsIngestionAddress"] as? String, !a.isEmpty { ytIngest = a }
+            }
+            status = "YouTube updated"
+        } catch { status = error.localizedDescription }
+    }
+
+    func ytApply(title: String) async {
+        guard !ytVideoID.isEmpty, var sn = ytBroadcast["snippet"] as? [String: Any] else { status = "No YouTube broadcast found. Create one in YouTube Studio first."; return }
+        sn["title"] = title
+        var body: [String: Any] = ["id": ytVideoID, "snippet": ["title": title, "scheduledStartTime": sn["scheduledStartTime"] ?? "", "description": sn["description"] ?? ""]]
+        if let cd = ytBroadcast["contentDetails"] { body["contentDetails"] = cd }   // PUT deletes what you omit
+        do {
+            _ = try await yt("PUT", "/liveBroadcasts", query: [.init(name: "part", value: "snippet,contentDetails")], body: body)
+            status = "YouTube title updated"; await refreshYouTube()
+        } catch { status = error.localizedDescription }
+    }
+
+    func ytSend(_ text: String) async {
+        guard !ytLiveChatID.isEmpty else { status = "No live chat on this broadcast yet"; return }
+        do {
+            _ = try await yt("POST", "/liveChatMessages", query: [.init(name: "part", value: "snippet")],
+                             body: ["snippet": ["liveChatId": ytLiveChatID, "type": "textMessageEvent", "textMessageDetails": ["messageText": text]]])
+        } catch { status = error.localizedDescription }
+    }
+
+    func disconnectYouTube() { forget("yt"); ytUser = ""; ytTitle = ""; ytVideoID = ""; ytStreamKey = "" }
+
+    // MARK: - plumbing
+
+    /// Authenticated JSON-object call with one token refresh + retry on 401.
+    private func call(_ method: String, _ url: String, query: [URLQueryItem] = [], body: [String: Any]? = nil,
+                      tokenKey: String, headers: [String: String] = [:], refresh: @escaping () async throws -> Void) async throws -> [String: Any] {
+        (try await callAny(method, url, query: query, body: body, tokenKey: tokenKey, headers: headers, refresh: refresh)) as? [String: Any] ?? [:]
+    }
+
+    private func callAny(_ method: String, _ url: String, query: [URLQueryItem] = [], body: [String: Any]? = nil,
+                         tokenKey: String, headers: [String: String] = [:], refresh: @escaping () async throws -> Void, retried: Bool = false) async throws -> Any {
+        var c = URLComponents(string: url)!
+        if !query.isEmpty { c.queryItems = query }
+        var req = URLRequest(url: c.url!)
+        req.httpMethod = method
+        req.setValue("Bearer \(d.string(forKey: tokenKey) ?? "")", forHTTPHeaderField: "Authorization")
+        headers.forEach { req.setValue($0.value, forHTTPHeaderField: $0.key) }
+        if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401, !retried {
+            try await refresh()
+            return try await callAny(method, url, query: query, body: body, tokenKey: tokenKey, headers: headers, refresh: refresh, retried: true)
+        }
+        guard (200..<300).contains(code) else { throw Self.err("\(url.split(separator: "/").suffix(2).joined(separator: "/")) → HTTP \(code): \(String(data: data, encoding: .utf8) ?? "")") }
+        return data.isEmpty ? [:] : ((try? JSONSerialization.jsonObject(with: data)) ?? [:])
+    }
 
     private func saveTokens(_ json: [String: Any], prefix: String) throws {
         guard let access = json["access_token"] as? String else { throw Self.err("no access_token in \(json)") }
@@ -287,11 +450,14 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         if let r = json["refresh_token"] as? String { d.set(r, forKey: prefix + "Refresh") }
     }
 
-    /// POST application/x-www-form-urlencoded, returns JSON object. Non-2xx throws unless allowError (device-flow polling).
-    private static func form(_ url: String, _ fields: [String: String], allowError: Bool = false) async throws -> [String: Any] {
+    private func forget(_ prefix: String) { [prefix + "Access", prefix + "Refresh"].forEach { d.removeObject(forKey: $0) } }
+
+    /// POST application/x-www-form-urlencoded → JSON object. Non-2xx throws unless allowError (device-flow polling).
+    private static func form(_ url: String, _ fields: [String: String], allowError: Bool = false, basic: (String, String)? = nil) async throws -> [String: Any] {
         var req = URLRequest(url: URL(string: url)!)
         req.httpMethod = "POST"
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        if let (u, p) = basic { req.setValue("Basic " + Data("\(u):\(p)".utf8).base64EncodedString(), forHTTPHeaderField: "Authorization") }
         var c = URLComponents(); c.queryItems = fields.map { URLQueryItem(name: $0.key, value: $0.value) }
         req.httpBody = c.percentEncodedQuery?.data(using: .utf8)
         let (data, resp) = try await URLSession.shared.data(for: req)
@@ -301,16 +467,15 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         return json
     }
 
+    private static func s256(_ verifier: String) -> String {
+        Data(SHA256.hash(data: Data(verifier.utf8))).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    }
+
     private static func random(_ n: Int) -> String {
         let chars = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
         return String((0..<n).map { _ in chars.randomElement()! })
     }
 
     private static func err(_ s: String) -> NSError { NSError(domain: "Platforms", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
-}
-
-private extension Data {
-    var base64URL: String {
-        base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-    }
 }

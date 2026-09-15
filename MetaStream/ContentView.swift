@@ -60,10 +60,23 @@ struct ContentView: View {
     @State private var showManager = false
     @State private var photoFlash = false
 
+    @AppStorage("restreamChatURL") var restreamChatURL = ""
+    @AppStorage("youtubeVideoID") var youtubeVideoID = ""
+
     private var chatURL: String {
-        chatSite == "twitch"
-            ? "https://www.twitch.tv/popout/\(chatChannel)/chat"
-            : "https://kick.com/popout/\(chatChannel)/chat"
+        switch chatSite {
+        case "twitch": return "https://www.twitch.tv/popout/\(chatChannel)/chat"
+        case "youtube": return "https://www.youtube.com/live_chat?is_popout=1&v=\(youtubeVideoID)"
+        case "restream": return restreamChatURL
+        default: return "https://kick.com/popout/\(chatChannel)/chat"
+        }
+    }
+    private var chatConfigured: Bool {
+        switch chatSite {
+        case "youtube": return !youtubeVideoID.isEmpty
+        case "restream": return !restreamChatURL.isEmpty
+        default: return !chatChannel.isEmpty
+        }
     }
 
     var body: some View {
@@ -276,12 +289,18 @@ struct ContentView: View {
 
     private var chatSheet: some View {
         Group {
-            if chatChannel.isEmpty {
+            if !chatConfigured {
                 VStack(spacing: 12) {
-                    Text("No chat channel set").font(.headline)
-                    Button("Open Settings") { showChat = false; showSettings = true }
-                        .buttonStyle(.borderedProminent)
+                    Text("No chat source set").font(.headline)
+                    Text("Set a channel name in Settings, or connect a platform in Stream Manager and tap “Use for streaming”.")
+                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    HStack {
+                        Button("Settings") { showChat = false; showSettings = true }
+                        Button("Stream Manager") { showChat = false; showManager = true }
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
+                .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ChatView(url: chatURL).ignoresSafeArea(edges: .bottom)

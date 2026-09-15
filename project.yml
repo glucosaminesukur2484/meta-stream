@@ -34,6 +34,9 @@ targets:
         KICK_CLIENT_ID: ""
         KICK_CLIENT_SECRET: ""
         TWITCH_CLIENT_ID: ""
+        RESTREAM_CLIENT_ID: ""
+        RESTREAM_CLIENT_SECRET: ""
+        YOUTUBE_CLIENT_ID: ""
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_ENTITLEMENTS: MetaStream/MetaStream.entitlements   # Wi-Fi entitlements the Meta SDK needs for video
     dependencies:
