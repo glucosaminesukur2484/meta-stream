@@ -65,7 +65,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     static let googleRedirect = "com.saeedkolivand.metastream:/oauth2redirect" // Google iOS clients accept the bundle-id scheme
     static let kickIngest = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     static let twitchIngest = "rtmps://live.twitch.tv:443/app/"
-    static let restreamIngest = "rtmps://live.restream.io:443/live"
+    static let restreamIngest = "rtmp://live.restream.io/live"   // Restream serves plain RTMP on 1935 (RTMPS on 443 hangs the handshake)
 
     var kickConnected: Bool { d.string(forKey: "kickAccess") != nil }
     var twitchConnected: Bool { d.string(forKey: "twitchAccess") != nil }

@@ -4,6 +4,7 @@ import AVFoundation
 import CoreMedia
 import VideoToolbox
 import UIKit
+import Network
 import os
 import MWDATCore
 import MWDATCamera
@@ -399,10 +400,18 @@ final class Streamer: ObservableObject {
                 try? await stream.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
 
                 applog("stream", "connecting to \(url) key=\(key.count) chars, mic=\(micUID.isEmpty ? "default" : micUID), bitrate=\(bitrateKbps)")
+                Task { await Self.netProbe(url) }        // logs which interface iOS picks and whether the host answers on it
                 Task { [connection] in                       // every NetConnection.* / NetStream.* status the server sends
                     for await st in await connection.status { applog("stream", "rtmp status: \(st.code) \(st.description)") }
                 }
-                _ = try await connection.connect(url)
+                // HaishinKit's own timeout doesn't always fire on a black-holed port; race the connect against a clock.
+                let conn = connection
+                try await withThrowingTaskGroup(of: Void.self) { g in
+                    g.addTask { _ = try await conn.connect(url) }
+                    g.addTask { try await Task.sleep(for: .seconds(12)); throw NSError(domain: "MetaStream", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not reach \(URL(string: url)?.host ?? url) within 12 s"]) }
+                    try await g.next()
+                    g.cancelAll()
+                }
                 applog("stream", "connected, publishing")
                 _ = try await stream.publish(key)
                 live = true
@@ -427,6 +436,7 @@ final class Streamer: ObservableObject {
             } catch {
                 applog("stream", "goLive failed: \(String(describing: error))", error: true)
                 rtmpState = error.localizedDescription
+                Task { try? await connection.close() }   // drop a half-open socket so the next attempt starts clean
             }
         }
     }
@@ -460,6 +470,38 @@ final class Streamer: ObservableObject {
         let list = Wearables.shared.devices.compactMap { Wearables.shared.deviceForIdentifier($0) }
             .map { "\($0.nameOrId()) \($0.linkState) \($0.compatibility())" }
         devices = list.isEmpty ? "none" : list.joined(separator: ", ")
+    }
+
+    /// Diagnostic: current network path + TCP reachability of the ingest host over the default route and over cellular only.
+    private static func netProbe(_ urlString: String) async {
+        guard let u = URL(string: urlString), let host = u.host else { return }
+        let port = UInt16(u.port ?? (u.scheme == "rtmps" ? 443 : 1935))
+        let path = await withCheckedContinuation { (c: CheckedContinuation<NWPath, Never>) in
+            let m = NWPathMonitor(); m.pathUpdateHandler = { p in c.resume(returning: p); m.cancel() }; m.start(queue: .global())
+        }
+        let ifaces = path.availableInterfaces.map { "\($0.name):\($0.type)" }.joined(separator: ",")
+        applog("stream", "net path status=\(path.status) wifi=\(path.usesInterfaceType(.wifi)) cell=\(path.usesInterfaceType(.cellular)) expensive=\(path.isExpensive) ifaces=[\(ifaces)]")
+        for (label, required) in [("default", nil), ("cellular", NWInterface.InterfaceType.cellular)] {
+            let params = NWParameters.tcp
+            if let required { params.requiredInterfaceType = required }
+            let conn = NWConnection(host: .init(host), port: .init(rawValue: port)!, using: params)
+            let result: String = await withCheckedContinuation { c in
+                var done = false
+                conn.stateUpdateHandler = { st in
+                    guard !done else { return }
+                    switch st {
+                    case .ready: done = true; c.resume(returning: "ready via \(conn.currentPath?.availableInterfaces.first.map { "\($0.type)" } ?? "?")")
+                    case .failed(let e): done = true; c.resume(returning: "failed: \(e)")
+                    case .waiting(let e): applog("stream", "probe \(label) waiting: \(e)")
+                    default: break
+                    }
+                }
+                conn.start(queue: .global())
+                DispatchQueue.global().asyncAfter(deadline: .now() + 6) { if !done { done = true; c.resume(returning: "timeout 6 s") } }
+            }
+            conn.cancel()
+            applog("stream", "probe \(label) \(host):\(port) -> \(result)", error: !result.hasPrefix("ready"))
+        }
     }
 
     // Free Apple IDs get a "personal team"; its ID is only visible inside the signed app's provisioning profile.

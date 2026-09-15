@@ -22,7 +22,7 @@ struct SettingsView: View {
         "kick": "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/",
         "twitch": "rtmps://live.twitch.tv:443/app/",
         "youtube": "rtmps://a.rtmps.youtube.com:443/live2",
-        "restream": "rtmps://live.restream.io:443/live",
+        "restream": "rtmp://live.restream.io/live",
     ]
     private static let hints: [String: String] = [
         "kick": "Kick accepts up to 8000 kbps.",
