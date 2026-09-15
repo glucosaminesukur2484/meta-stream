@@ -3,6 +3,7 @@ name: build-ipa
 on:
   push:
     branches: [main]
+    paths-ignore: ["docs/**", "README.md"]   # site/docs changes don't need an app build
   workflow_dispatch:
 
 concurrency:

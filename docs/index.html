@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MetaStream — IRL streaming from Ray-Ban Meta glasses</title>
+<meta name="description" content="Stream your Ray-Ban Meta glasses to Kick, Twitch, YouTube, Restream or any RTMP server. Chat, stream manager, phone-camera fallback, background streaming. Open source, built without a Mac.">
+<meta property="og:title" content="MetaStream — Your eyes, live.">
+<meta property="og:description" content="Ray-Ban Meta glasses → Kick, Twitch, YouTube, Restream. Chat, stream manager, fallback camera. Open source.">
+<meta property="og:image" content="https://metastream.iamsaeed.dev/screenshots/live.png">
+<meta property="og:url" content="https://metastream.iamsaeed.dev/">
+<meta name="theme-color" content="#000000">
+<link rel="icon" href="icon.png">
+<link rel="apple-touch-icon" href="icon.png">
+<style>
+  /* ── tokens (DESIGN.md) ─────────────────────────────────────────── */
+  :root{
+    --primary:#0066cc; --primary-focus:#0071e3; --primary-on-dark:#2997ff;
+    --ink:#1d1d1f; --on-dark:#fff; --body-muted:#ccc; --ink-80:#333; --ink-48:#7a7a7a;
+    --hairline:#e0e0e0; --canvas:#fff; --parchment:#f5f5f7; --pearl:#fafafc;
+    --tile1:#272729; --tile2:#2a2a2c; --tile3:#252527; --black:#000;
+    --display:"SF Pro Display",system-ui,-apple-system,BlinkMacSystemFont,"Inter",sans-serif;
+    --text:"SF Pro Text",system-ui,-apple-system,BlinkMacSystemFont,"Inter",sans-serif;
+    --shadow:rgba(0,0,0,.22) 3px 5px 30px 0;
+    --section:80px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--canvas);color:var(--ink);font:400 17px/1.47 var(--text);letter-spacing:-.374px;-webkit-font-smoothing:antialiased}
+  img{max-width:100%;height:auto;display:block}
+  a{color:var(--primary);text-decoration:none}
+  a:hover{text-decoration:underline}
+  h1,h2,h3{font-family:var(--display);font-weight:600;margin:0}
+
+  /* ── global nav ─────────────────────────────────────────────────── */
+  .nav{position:sticky;top:0;z-index:10;height:44px;background:var(--black);color:var(--on-dark);font:400 12px/1 var(--text);letter-spacing:-.12px}
+  .nav .in{max-width:1024px;margin:0 auto;height:100%;display:flex;align-items:center;justify-content:space-between;padding:0 22px}
+  .nav .brand{display:flex;align-items:center;gap:8px;color:#fff;font-weight:600;font-size:14px;letter-spacing:-.224px}
+  .nav .brand img{width:20px;height:20px;border-radius:5px}
+  .nav ul{list-style:none;margin:0;padding:0;display:flex;gap:28px}
+  .nav ul a{color:#fff;opacity:.85}
+  .nav ul a:hover{opacity:1;text-decoration:none}
+  @media (max-width:640px){.nav ul li:not(:last-child){display:none}}
+
+  /* ── tiles ──────────────────────────────────────────────────────── */
+  .tile{padding:var(--section) 22px;text-align:center}
+  .tile.light{background:var(--canvas);color:var(--ink)}
+  .tile.parchment{background:var(--parchment);color:var(--ink)}
+  .tile.dark{background:var(--tile1);color:var(--on-dark)}
+  .tile.dark2{background:var(--tile2);color:var(--on-dark)}
+  .tile.dark3{background:var(--tile3);color:var(--on-dark)}
+  .tile .in{max-width:980px;margin:0 auto}
+  .tile h2{font-size:40px;line-height:1.1}
+  .tile .lead{font:400 28px/1.14 var(--display);letter-spacing:.196px;margin:12px 0 0}
+  .tile.dark .lead,.tile.dark2 .lead,.tile.dark3 .lead{color:var(--body-muted)}
+  .tile p.copy{max-width:640px;margin:20px auto 0}
+  .tile.dark p.copy,.tile.dark2 p.copy,.tile.dark3 p.copy{color:var(--body-muted)}
+  .dark a,.dark2 a,.dark3 a{color:var(--primary-on-dark)}
+  .ctas{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:24px}
+  .pill{display:inline-block;padding:11px 22px;border-radius:9999px;background:var(--primary);color:#fff;font:400 17px/1.24 var(--text);letter-spacing:-.374px;transition:transform .12s}
+  .pill:hover{text-decoration:none}
+  .pill:active{transform:scale(.95)}
+  .pill:focus-visible{outline:2px solid var(--primary-focus);outline-offset:2px}
+  .pill.ghost{background:transparent;color:var(--primary);border:1px solid var(--primary)}
+  .dark .pill.ghost,.dark2 .pill.ghost,.dark3 .pill.ghost{color:var(--primary-on-dark);border-color:var(--primary-on-dark)}
+  .pill.big{padding:14px 28px;font-weight:300;font-size:18px;line-height:1}
+
+  /* hero */
+  .hero{padding-top:64px}
+  .hero h1{font-size:56px;line-height:1.07;letter-spacing:-.28px}
+  .hero .lead{margin-top:10px}
+  .hero .shot{margin:56px auto 0;width:min(380px,82vw)}
+  .shot img{border-radius:18px;box-shadow:var(--shadow);margin:0 auto}
+  .shots{display:grid;grid-template-columns:repeat(2,minmax(0,300px));gap:24px;justify-content:center;margin-top:48px}
+  .shots figure{margin:0}
+  .shots figcaption{font:400 14px/1.43 var(--text);letter-spacing:-.224px;color:var(--ink-48);margin-top:12px}
+  .dark .shots figcaption{color:var(--body-muted)}
+
+  /* utility grid (spec cards) */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:40px;text-align:left}
+  .card{background:var(--canvas);border:1px solid var(--hairline);border-radius:18px;padding:24px}
+  .card h3{font:600 17px/1.24 var(--text);letter-spacing:-.374px}
+  .card p{margin:6px 0 0;color:var(--ink-80);font-size:14px;line-height:1.43;letter-spacing:-.224px}
+  .card .n{font:600 34px/1.1 var(--display);letter-spacing:-.374px;color:var(--ink)}
+
+  /* steps */
+  .steps{counter-reset:s;list-style:none;padding:0;margin:40px auto 0;max-width:720px;text-align:left}
+  .steps li{counter-increment:s;display:grid;grid-template-columns:44px 1fr;gap:16px;padding:16px 0;border-top:1px solid rgba(255,255,255,.08)}
+  .steps li::before{content:counter(s);width:44px;height:44px;border-radius:50%;background:rgba(210,210,215,.14);color:#fff;display:grid;place-items:center;font:600 17px/1 var(--text)}
+  .steps b{display:block;font:600 17px/1.24 var(--text);letter-spacing:-.374px;color:#fff}
+  .steps span{color:var(--body-muted);font-size:14px;line-height:1.43;letter-spacing:-.224px}
+
+  /* footer */
+  footer{background:var(--parchment);color:var(--ink-80);padding:64px 22px;font:400 12px/1 var(--text);letter-spacing:-.12px}
+  footer .in{max-width:980px;margin:0 auto}
+  footer .cols{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;text-align:left}
+  footer h4{font:600 14px/1.29 var(--text);letter-spacing:-.224px;margin:0 0 4px}
+  footer .cols a{display:block;color:var(--ink-80);font:400 17px/2.41 var(--text)}
+  footer .legal{margin-top:40px;padding-top:20px;border-top:1px solid var(--hairline);color:var(--ink-48);line-height:1.5}
+
+  /* ── responsive ─────────────────────────────────────────────────── */
+  @media (max-width:1068px){.hero h1{font-size:40px}}
+  @media (max-width:833px){.grid{grid-template-columns:repeat(2,1fr)}.tile{padding:64px 22px}}
+  @media (max-width:640px){
+    .hero h1{font-size:34px}.tile h2{font-size:30px}.tile .lead{font-size:21px}
+    .grid,.shots,footer .cols{grid-template-columns:1fr}.shots{justify-items:center}.shots figure{max-width:300px}
+    .tile{padding:48px 18px}.steps li{grid-template-columns:36px 1fr}.steps li::before{width:36px;height:36px}
+  }
+  @media (max-width:419px){.hero h1{font-size:28px}}
+
+  /* ── scroll-driven entry (decorative, progressive enhancement) ───── */
+  @media (prefers-reduced-motion: no-preference){
+    @supports ((animation-timeline: view()) and (animation-range: entry)){
+      @keyframes rise{from{opacity:0;transform:translateY(24px)}}
+      .tile .in > *{animation:rise auto linear backwards;animation-timeline:view();animation-range:entry 0% entry 40%}
+    }
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Global">
+  <div class="in">
+    <a class="brand" href="#top"><img src="icon.png" alt="" width="20" height="20">MetaStream</a>
+    <ul>
+      <li><a href="#background">Background</a></li>
+      <li><a href="#chat">Chat</a></li>
+      <li><a href="#manager">Stream Manager</a></li>
+      <li><a href="#fallback">Fallback</a></li>
+      <li><a href="#build">Build it</a></li>
+      <li><a href="https://github.com/saeedkolivand/meta-stream">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<header id="top" class="tile light hero">
+  <div class="in">
+    <h1>Your eyes, live.</h1>
+    <p class="lead">Ray-Ban Meta glasses to Kick, Twitch, YouTube, Restream — with chat, a stream manager and a camera that never goes black.</p>
+    <div class="ctas">
+      <a class="pill big" href="#build">Build it yourself</a>
+      <a class="pill big ghost" href="https://github.com/saeedkolivand/meta-stream">View on GitHub</a>
+    </div>
+    <figure class="shot">
+      <img src="screenshots/live.png" alt="MetaStream live screen: the glasses' point of view with status pills and a Go Live button" width="640" height="1387" fetchpriority="high">
+    </figure>
+  </div>
+</header>
+
+<section id="background" class="tile dark">
+  <div class="in">
+    <h2>Keeps streaming when you leave.</h2>
+    <p class="lead">Check chat. Answer a text. Open Maps. The glasses never notice.</p>
+    <p class="copy">Video comes off the glasses as compressed HEVC and goes straight to your RTMP server without touching an encoder. The phone stays cool, the battery lasts, and the stream survives every app switch — the one thing every other glasses app gets wrong.</p>
+  </div>
+</section>
+
+<section id="chat" class="tile parchment">
+  <div class="in">
+    <h2>Chat where you can see it.</h2>
+    <p class="lead">Kick, Twitch, YouTube or Restream chat slides up over your own feed.</p>
+    <div class="shots">
+      <figure><img src="screenshots/manager.png" alt="Stream Manager showing a connected Kick account with title, category, stream key and chat" width="640" height="1387" loading="lazy"><figcaption>Stream Manager</figcaption></figure>
+      <figure><img src="screenshots/settings.png" alt="Settings sheet with destination, bitrate, chat, resolution and frame rate" width="640" height="1387" loading="lazy"><figcaption>Settings</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="manager" class="tile dark2">
+  <div class="in">
+    <h2>Run the broadcast from your pocket.</h2>
+    <p class="lead">Log in once. Then title, category, viewers, chat and stream key are one tap away.</p>
+    <p class="copy">Connect Kick, Twitch, Restream and YouTube inside the app. Edit the title and category, watch the viewer count, send a chat message, and pull your stream key automatically — no copying keys between apps, no OBS, no server in the middle. Restream even re-encodes for platforms that refuse HEVC.</p>
+  </div>
+</section>
+
+<section id="fallback" class="tile light">
+  <div class="in">
+    <h2>Never a black stream.</h2>
+    <p class="lead">Glasses drop, phone camera takes over in two seconds. Same codec, no restart.</p>
+    <p class="copy">Take the glasses off, fold them, walk out of range — the back or front camera fills in until they reconnect, then hands back. Switch sources on purpose with one tap. Mute the mic or black out the camera without stopping the stream.</p>
+  </div>
+</section>
+
+<section class="tile parchment">
+  <div class="in">
+    <h2>Built for the road.</h2>
+    <p class="lead">Every choice made for IRL, on cellular, for hours.</p>
+    <div class="grid">
+      <div class="card"><div class="n">720p</div><h3>1280 × 720, up to 30 fps</h3><p>The Meta SDK's ceiling for any third-party app. Portrait, straight from the glasses.</p></div>
+      <div class="card"><div class="n">0×</div><h3>Zero re-encoding</h3><p>HEVC passthrough over Enhanced RTMP. Nothing decoded, nothing encoded, nothing warm.</p></div>
+      <div class="card"><div class="n">2 s</div><h3>Fallback camera</h3><p>Back or front camera, encoded as HEVC at the same size so the stream never changes format.</p></div>
+      <div class="card"><div class="n">4</div><h3>Platforms signed in</h3><p>Kick, Twitch, Restream, YouTube. Tokens stay on the phone. No backend anywhere.</p></div>
+      <div class="card"><div class="n">∞</div><h3>Any RTMP destination</h3><p>Presets for the big four plus Instagram, TikTok and your own relay into OBS.</p></div>
+      <div class="card"><div class="n">0</div><h3>Macs required</h3><p>Compiled on GitHub's runners, signed in CI, installed over USB from Windows.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="build" class="tile dark3">
+  <div class="in">
+    <h2>Build your own.</h2>
+    <p class="lead">Open source. Your glasses, your accounts, your copy.</p>
+    <ol class="steps">
+      <li><b>Fork the repo</b><span>Pick a bundle ID. Everything else is a secret you add to the fork.</span></li>
+      <li><b>Register with Meta</b><span>Free Wearables Developer Center project. Turn on Developer Mode in the Meta AI app.</span></li>
+      <li><b>Sign with a paid Apple team</b><span>Yours or a friend's. The glasses' Wi-Fi link needs two entitlements only paid teams get.</span></li>
+      <li><b>Push</b><span>GitHub Actions builds and signs an encrypted IPA. Decrypt, install over USB. Done.</span></li>
+    </ol>
+    <div class="ctas">
+      <a class="pill" href="https://github.com/saeedkolivand/meta-stream#build-your-own-copy">Read the guide</a>
+      <a class="pill ghost" href="https://github.com/saeedkolivand/meta-stream">Source on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="in">
+    <div class="cols">
+      <div><h4>Project</h4><a href="https://github.com/saeedkolivand/meta-stream">GitHub</a><a href="https://github.com/saeedkolivand/meta-stream#build-your-own-copy">Build guide</a><a href="https://github.com/saeedkolivand/meta-stream#troubleshooting">Troubleshooting</a></div>
+      <div><h4>Built on</h4><a href="https://github.com/facebook/meta-wearables-dat-ios">Meta Wearables Device Access Toolkit</a><a href="https://github.com/HaishinKit/HaishinKit.swift">HaishinKit</a><a href="https://github.com/doronz88/pymobiledevice3">pymobiledevice3</a></div>
+      <div><h4>Author</h4><a href="https://iamsaeed.dev">Saeed Kolivand</a><a href="https://kick.com/saeedified">Kick</a></div>
+    </div>
+    <p class="legal">MetaStream is an independent open-source project and is not affiliated with, endorsed by or sponsored by Meta, EssilorLuxottica, Kick, Twitch, Google or Restream. Ray-Ban and Meta are trademarks of their respective owners. Streams from the glasses are limited to 1280 × 720 at 30 fps by the Meta SDK. HEVC delivery to Twitch requires Affiliate or Partner status.</p>
+  </div>
+</footer>
+
+</body>
+</html>
