@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import WebKit
+import HaishinKit
 
 // MARK: - UIKit bridges
 
@@ -18,6 +19,18 @@ struct PreviewView: UIViewRepresentable {
         return view
     }
     func updateUIView(_ uiView: PreviewUIView, context: Context) {}
+}
+
+/// HaishinKit Metal view showing the phone camera (mixer output). Glasses frames go to PreviewView instead.
+struct PhonePreview: UIViewRepresentable {
+    @EnvironmentObject var streamer: Streamer
+    func makeUIView(context: Context) -> MTHKView {
+        let v = MTHKView(frame: .zero)
+        v.videoGravity = .resizeAspect
+        streamer.attachPhonePreview(v)
+        return v
+    }
+    func updateUIView(_ uiView: MTHKView, context: Context) {}
 }
 
 struct ChatView: UIViewRepresentable {
@@ -82,21 +95,13 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            PreviewView().ignoresSafeArea()
+            if streamer.source == "phone" { PhonePreview().ignoresSafeArea() } else { PreviewView().ignoresSafeArea() }
 
             if streamer.cameraOff {
                 VStack(spacing: 8) {
                     Image(systemName: "video.slash.fill").font(.system(size: 44))
                     Text("Camera off").font(.headline)
                     Text("viewers see black").font(.caption).foregroundStyle(.secondary)
-                }
-                .foregroundStyle(.white)
-            } else if streamer.source == "phone" {
-                VStack(spacing: 8) {
-                    Image(systemName: "iphone.rear.camera").font(.system(size: 44))
-                    Text("Phone camera").font(.headline)
-                    Text(streamer.manualSource == "auto" ? "glasses reconnecting…" : "tap the source pill to switch back")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
                 .foregroundStyle(.white)
             }

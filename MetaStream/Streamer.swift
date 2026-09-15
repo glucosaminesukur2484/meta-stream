@@ -73,6 +73,18 @@ final class Streamer: ObservableObject {
     private let connection = RTMPConnection()          // advertises hvc1 in the enhanced-RTMP connect by default
     private lazy var stream = RTMPStream(connection: connection)
     private let mixer = MediaMixer()
+    private var mixerWired = false
+
+    /// Phone-camera frames flow mixer → encoder → RTMP stream (and → preview view). Wired once, on first need.
+    private func wireMixer() async {
+        guard !mixerWired else { return }
+        mixerWired = true
+        await mixer.addOutput(stream)
+        await mixer.startRunning()
+    }
+
+    /// The live screen registers HaishinKit's Metal view here to preview the phone camera.
+    func attachPhonePreview(_ view: MTHKView) { Task { await mixer.addOutput(view) } }
 
     init() {
         teamID = Self.readTeamID()
@@ -93,6 +105,7 @@ final class Streamer: ObservableObject {
                 self?.refreshMics()
             }
         }
+        evaluateSource()                                // glasses off at launch → phone camera after 2 s
         Task { [weak self] in                           // 1 s stats tick for the HUD
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
@@ -260,7 +273,6 @@ final class Streamer: ObservableObject {
 
     private func evaluateSource() {
         fallbackTask?.cancel()
-        guard live else { return }
         switch manualSource {
         case "back", "front":
             Task { await switchTo(glasses: false) }     // re-attaching with the other position swaps cameras
@@ -275,7 +287,7 @@ final class Streamer: ObservableObject {
         } else if source == "glasses" {
             fallbackTask = Task { [weak self] in        // ponytail: 2 s debounce, no hysteresis
                 try? await Task.sleep(for: .seconds(2))
-                guard let self, !Task.isCancelled, self.live, !self.glassesStreaming else { return }
+                guard let self, !Task.isCancelled, !self.glassesStreaming else { return }
                 await self.switchTo(glasses: false)
             }
         }
@@ -290,6 +302,7 @@ final class Streamer: ObservableObject {
                 // Encoded by HaishinKit as HEVC 720x1280 (see setVideoSettings), same codec as the glasses,
                 // so the RTMP stream never changes format. Phone capture pauses in background; glasses HEVC doesn't.
                 let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: fallbackPosition)
+                await wireMixer()
                 try await mixer.attachVideo(cam)
                 await mixer.setVideoOrientation(.portrait)
                 source = "phone"
@@ -303,10 +316,14 @@ final class Streamer: ObservableObject {
 
     func refreshMics() {
         let s = AVAudioSession.sharedInstance()
-        // allowBluetoothHFP is what makes the glasses show up as an input.
-        // Category only; activating here kept the mic "in use" (orange dot) even when idle.
-        try? s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
-        mics = (s.availableInputs ?? []).map { Mic(id: $0.uid, name: $0.portName) }
+        // allowBluetoothHFP is what makes the glasses show up as an input. Set the category once: setting it on
+        // every route change re-fires routeChangeNotification, which is an infinite refresh loop.
+        if s.category != .playAndRecord {
+            try? s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+        }
+        let list = (s.availableInputs ?? []).map { Mic(id: $0.uid, name: $0.portName) }
+        guard list != mics else { return }
+        mics = list
         applog("stream", "mics: \(mics.map(\.name))")
     }
 
@@ -370,8 +387,7 @@ final class Streamer: ObservableObject {
                 try audioSession.setActive(true)
 
                 if !muted { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
-                await mixer.addOutput(stream)
-                await mixer.startRunning()
+                await wireMixer()
 
                 // profileLevel containing "HEVC" flips HaishinKit's internal format to .hevc (onMetaData codec id)
                 // and makes the fallback-camera encoder produce HEVC too.
