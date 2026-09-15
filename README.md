@@ -172,6 +172,8 @@ Bluetooth but never receives a frame. This is Apple's rule, and the app can't wo
 | Relay/OBS shows nothing | Stream key empty? Any non-empty key works for your own server. Check the server accepts Enhanced-RTMP HEVC (FFmpeg ≥ 6.1 does). |
 | Kick login page opens the Kick app instead | A universal-link quirk. Long-press the link and open it in the browser, or retry. |
 | Twitch rejects the stream | Non-Affiliate accounts don't accept HEVC. Use Restream or a relay that transcodes. |
+| Ingest connects but shows offline, or OBS stays blank | The destination refused HEVC. Set the codec to H.264 in Settings (Auto already does this for Kick and Twitch). |
+| Stream freezes when you leave the app in H.264 mode | iOS stops the hardware decoder in the background. Keep the Picture in Picture window open, or send HEVC to Restream or your own relay instead. |
 
 ## Security notes
 
