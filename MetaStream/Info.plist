@@ -78,6 +78,8 @@
 	<array>
 		<string>_bonjour._tcp</string>
 	</array>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Saves photos taken with your glasses</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Adds your voice to the live stream</string>
 	<key>NSCameraUsageDescription</key>

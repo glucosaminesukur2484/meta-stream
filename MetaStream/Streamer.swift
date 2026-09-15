@@ -3,6 +3,7 @@ import Combine
 import AVFoundation
 import CoreMedia
 import VideoToolbox
+import UIKit
 import MWDATCore
 import MWDATCamera
 import HaishinKit
@@ -14,13 +15,27 @@ struct Mic: Identifiable, Hashable { let id: String; let name: String }   // id 
 final class Streamer: ObservableObject {
     @Published var registration = "unknown"
     @Published var glassesState = "idle"
+    @Published var glassesOn = false
     @Published var rtmpState = "idle"
     @Published var frames = 0
+    @Published var fps = 0
+    @Published var kbps = 0
     @Published var teamID = "unknown (not sideloaded yet)"
     @Published var live = false
+    @Published var liveSince: Date?
     @Published var devices = "none seen yet"
     @Published var source = "glasses"          // "glasses" | "phone" (fallback camera while glasses are down)
     @Published var mics: [Mic] = []
+    @Published var muted = false
+    @Published var lastPhotoAt: Date?
+
+    /// Short glasses state for the HUD: "streaming" | "connecting" | "off".
+    var glassesShort: String {
+        let s = glassesState.lowercased()
+        if s.contains("streaming") { return "streaming" }
+        if ["starting", "looking", "waiting", "connecting", "session started"].contains(where: { s.contains($0) }) { return "connecting" }
+        return "off"
+    }
 
     // ponytail: ContentView sets this directly instead of a delegate protocol.
     weak var preview: AVSampleBufferDisplayLayer?
@@ -32,6 +47,8 @@ final class Streamer: ObservableObject {
     private var glassesStreaming = false
     private var fallbackTask: Task<Void, Never>?
     private var fallbackPosition: AVCaptureDevice.Position = .back
+    private var tickFrames = 0
+    private var tickBytes = 0
 
     private let connection = RTMPConnection()          // advertises hvc1 in the enhanced-RTMP connect by default
     private lazy var stream = RTMPStream(connection: connection)
@@ -55,6 +72,16 @@ final class Streamer: ObservableObject {
                 self?.refreshMics()
             }
         }
+        Task { [weak self] in                           // 1 s stats tick for the HUD
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                self.fps = self.tickFrames
+                self.kbps = self.tickBytes * 8 / 1000
+                self.tickFrames = 0
+                self.tickBytes = 0
+            }
+        }
     }
 
     // MARK: glasses
@@ -66,7 +93,8 @@ final class Streamer: ObservableObject {
     }
 
     // Same order as Meta's CameraAccess sample: session.start() → wait for .started → addCamera → stream.start().
-    func startGlasses() {
+    func startGlasses(resolution: String = "high", fps: UInt = 30) {
+        glassesOn = true
         Task {
             do {
                 // ponytail: not branching on the returned status; createSession fails anyway if denied.
@@ -81,15 +109,18 @@ final class Streamer: ObservableObject {
                 }
                 guard let id = selector.activeDevice, let device = Wearables.shared.deviceForIdentifier(id) else {
                     glassesState = "no linked glasses. Open Meta AI, make sure glasses are connected, then retry"
+                    glassesOn = false
                     return
                 }
                 switch device.compatibility() {
                 case .deviceUpdateRequired:
                     glassesState = "glasses firmware too old, opening Meta AI update"
+                    glassesOn = false
                     try await Wearables.shared.openFirmwareUpdate()
                     return
                 case .sdkUpdateRequired:
                     glassesState = "app SDK too old for these glasses, rebuild with newer DAT"
+                    glassesOn = false
                     return
                 default: break
                 }
@@ -110,15 +141,21 @@ final class Streamer: ObservableObject {
                 // Wait until the device link is up; addCamera returns nil before that.
                 tries = 0
                 while session.state != .started, tries < 60 {           // ponytail: 30 s ceiling
-                    if session.state == .stopped { return }             // error listener already reported why
+                    if session.state == .stopped { glassesOn = false; return }   // error listener already reported why
                     try await Task.sleep(for: .milliseconds(500)); tries += 1
                 }
-                guard session.state == .started else { glassesState = "session never reached started (\(session.state.description))"; return }
+                guard session.state == .started else {
+                    glassesState = "session never reached started (\(session.state.description))"
+                    glassesOn = false
+                    return
+                }
 
-                // hvc1 = compressed HEVC, keeps delivering while the app is in the background. .high = 720x1280.
-                let config = StreamConfiguration(videoCodec: .hvc1, resolution: .high, frameRate: 30)
+                // hvc1 = compressed HEVC, keeps delivering while the app is in the background.
+                let res: StreamingResolution = resolution == "low" ? .low : resolution == "medium" ? .medium : .high
+                let config = StreamConfiguration(videoCodec: .hvc1, resolution: res, frameRate: fps)
                 guard let camera = try session.addCamera(config: config) else {
                     glassesState = "addCamera returned nil"
+                    glassesOn = false
                     return
                 }
                 self.camera = camera
@@ -143,6 +180,8 @@ final class Streamer: ObservableObject {
                     Task { @MainActor in
                         guard let self else { return }
                         self.frames += 1
+                        self.tickFrames += 1
+                        self.tickBytes += CMSampleBufferGetTotalSampleSize(frame.sampleBuffer)
                         if self.live && self.source == "glasses" {
                             Task { await self.stream.append(frame.sampleBuffer) }   // compressed → passthrough, no encode
                         }
@@ -152,12 +191,22 @@ final class Streamer: ObservableObject {
                         }
                     }
                 })
+                tokens.append(camera.stream.photoDataPublisher.listen { [weak self] photo in
+                    Task { @MainActor in
+                        if let img = UIImage(data: photo.data) {
+                            UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil)
+                            self?.lastPhotoAt = Date()
+                        }
+                    }
+                })
                 camera.stream.start()
             } catch DeviceSessionError.datAppOnTheGlassesUpdateRequired {
                 glassesState = "glasses need the Meta app update, opening Meta AI"
+                glassesOn = false
                 try? await Wearables.shared.openDATGlassesAppUpdate()
             } catch {
                 glassesState = error.localizedDescription
+                glassesOn = false
             }
         }
     }
@@ -170,8 +219,13 @@ final class Streamer: ObservableObject {
         session = nil
         tokens.removeAll()
         glassesStreaming = false
+        glassesOn = false
         glassesState = "stopped"
         evaluateSource()
+    }
+
+    func capturePhoto() {
+        _ = camera?.stream.capturePhoto(format: .jpeg)
     }
 
     // MARK: fallback camera (StreamHand-style: glasses drop → phone camera, glasses back → glasses)
@@ -218,6 +272,13 @@ final class Streamer: ObservableObject {
         mics = (s.availableInputs ?? []).map { Mic(id: $0.uid, name: $0.portName) }
     }
 
+    func setMuted(_ on: Bool) {
+        muted = on
+        Task {   // ponytail: mute = detach the mic; AudioMixerSettings per-track flags avoided
+            try? await mixer.attachAudio(on ? nil : AVCaptureDevice.default(for: .audio))
+        }
+    }
+
     // MARK: RTMP
 
     func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position) {
@@ -232,7 +293,7 @@ final class Streamer: ObservableObject {
                 }
                 try audioSession.setActive(true)
 
-                try await mixer.attachAudio(AVCaptureDevice.default(for: .audio))
+                if !muted { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
                 await mixer.addOutput(stream)
                 await mixer.startRunning()
 
@@ -248,6 +309,7 @@ final class Streamer: ObservableObject {
                 _ = try await connection.connect(url)
                 _ = try await stream.publish(key)
                 live = true
+                liveSince = Date()
                 rtmpState = "live"
                 evaluateSource()
 
@@ -272,6 +334,7 @@ final class Streamer: ObservableObject {
 
     func stopLive() {
         live = false
+        liveSince = nil
         fallbackTask?.cancel()
         rtmpState = "stopped"
         Task {
