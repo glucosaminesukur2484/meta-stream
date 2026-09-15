@@ -31,7 +31,7 @@ targets:
         CLIENT_TOKEN: ""
         TEAM_ID: ""
         CODE_SIGN_STYLE: Manual
-        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGN_ENTITLEMENTS: MetaStream/MetaStream.entitlements   # Wi-Fi entitlements the Meta SDK needs for video
     dependencies:
       - package: MetaWearablesDAT
         product: MWDATCore
