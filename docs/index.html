@@ -88,7 +88,7 @@
   .steps li{counter-increment:s;display:grid;grid-template-columns:44px 1fr;gap:16px;padding:16px 0;border-top:1px solid rgba(255,255,255,.08)}
   .steps li::before{content:counter(s);width:44px;height:44px;border-radius:50%;background:rgba(210,210,215,.14);color:#fff;display:grid;place-items:center;font:600 17px/1 var(--text)}
   .steps b{display:block;font:600 17px/1.24 var(--text);letter-spacing:-.374px;color:#fff}
-  .steps span{color:var(--body-muted);font-size:14px;line-height:1.43;letter-spacing:-.224px}
+  .steps span{grid-column:2;color:var(--body-muted);font-size:14px;line-height:1.43;letter-spacing:-.224px}
 
   /* footer */
   footer{background:var(--parchment);color:var(--ink-80);padding:64px 22px;font:400 12px/1 var(--text);letter-spacing:-.12px}
