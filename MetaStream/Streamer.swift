@@ -11,6 +11,17 @@ import RTMPHaishinKit
 
 struct Mic: Identifiable, Hashable { let id: String; let name: String }   // id = AVAudioSessionPortDescription.uid
 
+/// State the SDK's frame thread reads 30×/s without hopping to the main actor. Publishing per frame made
+/// SwiftUI re-render the whole screen at 30 fps (54% CPU, iOS cpu_resource report); now stats publish once a second.
+// ponytail: plain vars behind @unchecked Sendable; counters can race by a frame, which the HUD can't show anyway.
+private final class Hot: @unchecked Sendable {
+    var live = false
+    var forward = true                 // source == "glasses" && !cameraOff
+    var frames = 0
+    var bytes = 0
+    weak var preview: AVSampleBufferDisplayLayer?
+}
+
 @MainActor
 final class Streamer: ObservableObject {
     @Published var registration = "unknown"
@@ -21,14 +32,14 @@ final class Streamer: ObservableObject {
     @Published var fps = 0
     @Published var kbps = 0
     @Published var teamID = "unknown (not sideloaded yet)"
-    @Published var live = false
+    @Published var live = false { didSet { hot.live = live } }
     @Published var liveSince: Date?
     @Published var devices = "none seen yet"
-    @Published var source = "glasses"          // "glasses" | "phone" (what is actually going out right now)
+    @Published var source = "glasses" { didSet { hot.forward = source == "glasses" && !cameraOff } }   // what is going out right now
     @Published var manualSource = "auto"       // "auto" | "glasses" | "back" | "front" (user's choice)
     @Published var mics: [Mic] = []
     @Published var muted = false
-    @Published var cameraOff = false           // privacy: black frames go out instead of any camera
+    @Published var cameraOff = false { didSet { hot.forward = source == "glasses" && !cameraOff } }   // black frames go out instead
     @Published var lastPhotoAt: Date?
     private var blackTask: Task<Void, Never>?
 
@@ -41,7 +52,14 @@ final class Streamer: ObservableObject {
     }
 
     // ponytail: ContentView sets this directly instead of a delegate protocol.
-    weak var preview: AVSampleBufferDisplayLayer?
+    var preview: AVSampleBufferDisplayLayer? {
+        get { hot.preview }
+        set { hot.preview = newValue }
+    }
+
+    private let hot = Hot()
+    private var lastFrames = 0
+    private var lastBytes = 0
 
     private var session: DeviceSession?
     private var camera: Camera?
@@ -50,8 +68,6 @@ final class Streamer: ObservableObject {
     private var glassesStreaming = false
     private var fallbackTask: Task<Void, Never>?
     private var fallbackPosition: AVCaptureDevice.Position = .back
-    private var tickFrames = 0
-    private var tickBytes = 0
 
     private let connection = RTMPConnection()          // advertises hvc1 in the enhanced-RTMP connect by default
     private lazy var stream = RTMPStream(connection: connection)
@@ -79,10 +95,11 @@ final class Streamer: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self else { return }
-                self.fps = self.tickFrames
-                self.kbps = self.tickBytes * 8 / 1000
-                self.tickFrames = 0
-                self.tickBytes = 0
+                let f = self.hot.frames, b = self.hot.bytes
+                self.fps = f - self.lastFrames
+                self.kbps = (b - self.lastBytes) * 8 / 1000
+                self.frames = f
+                self.lastFrames = f; self.lastBytes = b
             }
         }
     }
@@ -179,19 +196,18 @@ final class Streamer: ObservableObject {
                         self.evaluateSource()
                     }
                 })
-                tokens.append(camera.stream.videoFramePublisher.listen { [weak self] frame in
-                    Task { @MainActor in
-                        guard let self else { return }
-                        self.frames += 1
-                        self.tickFrames += 1
-                        self.tickBytes += CMSampleBufferGetTotalSampleSize(frame.sampleBuffer)
-                        if self.live && self.source == "glasses" && !self.cameraOff {
-                            Task { await self.stream.append(frame.sampleBuffer) }   // compressed → passthrough, no encode
-                        }
-                        if let preview = self.preview {
-                            if preview.status == .failed { preview.flush() }
-                            preview.enqueue(frame.sampleBuffer)                  // layer decodes HEVC itself
-                        }
+                let hot = self.hot, rtmp = self.stream
+                tokens.append(camera.stream.videoFramePublisher.listen { frame in
+                    // Runs on the SDK's thread. No main-actor hop: nothing here touches SwiftUI state.
+                    let sb = frame.sampleBuffer
+                    hot.frames += 1
+                    hot.bytes += CMSampleBufferGetTotalSampleSize(sb)
+                    if hot.live && hot.forward {
+                        Task { await rtmp.append(sb) }                        // compressed → passthrough, no encode
+                    }
+                    if let preview = hot.preview {                            // AVSampleBufferDisplayLayer is thread-safe
+                        if preview.status == .failed { preview.flush() }
+                        preview.enqueue(sb)                                   // layer decodes HEVC itself
                     }
                 })
                 tokens.append(camera.stream.photoDataPublisher.listen { [weak self] photo in
@@ -286,8 +302,8 @@ final class Streamer: ObservableObject {
     func refreshMics() {
         let s = AVAudioSession.sharedInstance()
         // allowBluetoothHFP is what makes the glasses show up as an input.
+        // Category only; activating here kept the mic "in use" (orange dot) even when idle.
         try? s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
-        try? s.setActive(true)
         mics = (s.availableInputs ?? []).map { Mic(id: $0.uid, name: $0.portName) }
     }
 
