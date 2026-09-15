@@ -22,7 +22,24 @@ private final class Hot: @unchecked Sendable {
     var frames = 0
     var bytes = 0
     var transcoder: Transcoder?         // non-nil = decode HEVC → H.264 encoder instead of passthrough
+    var showMixerVideo = false          // preview shows mixer output (phone camera / black) instead of glasses frames
     weak var preview: AVSampleBufferDisplayLayer?
+}
+
+/// Mirrors the mixer's video (phone camera, black frames) into the same preview layer the glasses use,
+/// so one layer feeds the screen and Picture in Picture whatever the source is.
+private final class LayerSink: MediaMixerOutput, @unchecked Sendable {
+    private let hot: Hot
+    init(hot: Hot) { self.hot = hot }
+    var videoTrackId: UInt8? { 0 }
+    var audioTrackId: UInt8? { nil }
+    func mixer(_ mixer: MediaMixer, didOutput sampleBuffer: CMSampleBuffer) {
+        guard hot.showMixerVideo, let p = hot.preview else { return }
+        if p.status == .failed { p.flush() }
+        p.enqueue(sampleBuffer)
+    }
+    func mixer(_ mixer: MediaMixer, didOutput buffer: AVAudioPCMBuffer, when: AVAudioTime) {}
+    func selectTrack(_ id: UInt8?, mediaType: CMFormatDescription.MediaType) async {}
 }
 
 @MainActor
@@ -38,11 +55,17 @@ final class Streamer: ObservableObject {
     @Published var live = false { didSet { hot.live = live } }
     @Published var liveSince: Date?
     @Published var devices = "none seen yet"
-    @Published var source = "glasses" { didSet { hot.forward = source == "glasses" && !cameraOff; applog("stream", "source=\(source) manual=\(manualSource)") } }   // what is going out right now
+    @Published var source = "glasses" { didSet { syncHot(); applog("stream", "source=\(source) manual=\(manualSource)") } }   // what is going out right now
     @Published var manualSource = "auto"       // "auto" | "glasses" | "back" | "front" (user's choice)
     @Published var mics: [Mic] = []
     @Published var muted = false
-    @Published var cameraOff = false { didSet { hot.forward = source == "glasses" && !cameraOff } }   // black frames go out instead
+    @Published var cameraOff = false { didSet { syncHot() } }   // black frames go out instead
+
+    private func syncHot() {
+        hot.forward = source == "glasses" && !cameraOff
+        let show = source == "phone" || cameraOff
+        if show != hot.showMixerVideo { hot.showMixerVideo = show; hot.preview?.flush() }   // format switches between sources
+    }
     @Published var lastPhotoAt: Date?
     private var blackTask: Task<Void, Never>?
 
@@ -61,6 +84,7 @@ final class Streamer: ObservableObject {
     }
 
     private let hot = Hot()
+    private lazy var sink = LayerSink(hot: hot)
     var pip: PiPController?                        // owned here so it outlives SwiftUI view rebuilds
     private var lastFrames = 0
     private var lastBytes = 0
@@ -83,11 +107,9 @@ final class Streamer: ObservableObject {
         guard !mixerWired else { return }
         mixerWired = true
         await mixer.addOutput(stream)
+        await mixer.addOutput(sink)
         await mixer.startRunning()
     }
-
-    /// The live screen registers HaishinKit's Metal view here to preview the phone camera.
-    func attachPhonePreview(_ view: MTHKView) { Task { await mixer.addOutput(view) } }
 
     init() {
         teamID = Self.readTeamID()
@@ -224,7 +246,7 @@ final class Streamer: ObservableObject {
                         if let t = hot.transcoder { t.decode(sb) }            // H.264 mode: decode → mixer → encoder
                         else { Task { await rtmp.append(sb) } }               // HEVC mode: passthrough, no encode
                     }
-                    if let preview = hot.preview {                            // AVSampleBufferDisplayLayer is thread-safe
+                    if !hot.showMixerVideo, let preview = hot.preview {       // AVSampleBufferDisplayLayer is thread-safe
                         if preview.status == .failed { preview.flush() }
                         preview.enqueue(sb)                                   // layer decodes HEVC itself
                     }
