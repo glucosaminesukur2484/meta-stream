@@ -76,6 +76,14 @@ final class Streamer: ObservableObject {
     @Published var lastPhotoAt: Date?
     private var blackTask: Task<Void, Never>?
 
+    // MARK: health
+    // ponytail: no glasses battery — MWDATCore 0.9.0 has no battery API anywhere on Device/DeviceState
+    // (checked the full 0.9 type index, not just one page). Thermal is the one piece of glasses health
+    // the SDK actually exposes, via DeviceState.thermalLevel — see glassesThermal below.
+    @Published var glassesThermal: ThermalLevel? { didSet { checkGlassesThermal() } }   // nil when unknown/disconnected
+    @Published var phoneBattery: Int? { didSet { checkPhoneBattery() } }      // nil when unknown; unmonitored outside a live session
+    @Published var thermal: ProcessInfo.ThermalState = .nominal { didSet { checkThermal() } }
+
     /// Short glasses state for the HUD: "streaming" | "connecting" | "off".
     var glassesShort: String {
         let s = glassesState.lowercased()
@@ -110,6 +118,12 @@ final class Streamer: ObservableObject {
     private var escalated2m = false
     private var escalated5m = false
     private var backoff: TimeInterval = 1
+    private var warnedPhoneBattery = false     // < 15%, once per session — reset in goLive()
+    private var warnedThermal = false          // >= .serious, once per session — reset in goLive()
+    private var warnedGlassesThermal = false   // >= .severe, once per session — reset in goLive()
+    private var batteryObserver: NSObjectProtocol?
+    private var thermalObserver: NSObjectProtocol?
+    private var glassesThermalTask: Task<Void, Never>?
 
     private let connection = RTMPConnection()          // advertises hvc1 in the enhanced-RTMP connect by default
     private lazy var stream = RTMPStream(connection: connection)
@@ -207,7 +221,22 @@ final class Streamer: ObservableObject {
                 let session = try Wearables.shared.createSession(deviceSelector: selector)
                 self.session = session
                 tokens.append(session.statePublisher.listen { [weak self] state in
-                    Task { @MainActor in self?.glassesState = "session \(state.description)" }
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.glassesState = "session \(state.description)"
+                        // ponytail: no HingeState to read — MWDATCore 0.9.0 has no such type (see the
+                        // health-properties comment above). Meta's own AGENTS.md says folding the hinge
+                        // drops Bluetooth and forces the session to .stopped, so treat .stopped as the
+                        // fold proxy: skip the 2 s frame-loss debounce in evaluateSource() and switch to
+                        // the phone camera right away. Never ends the broadcast — that's stopLive()'s
+                        // job alone, always a separate deliberate act. Ceiling: .stopped also covers a
+                        // dead battery or walking out of range, so those get the fast switch too — same
+                        // desired outcome, so harmless; a real HingeState replaces this proxy outright.
+                        if state == .stopped, self.manualSource == "auto", self.source == "glasses" {
+                            self.fallbackTask?.cancel()
+                            await self.switchTo(glasses: false)
+                        }
+                    }
                 })
                 tokens.append(session.errorPublisher.listen { [weak self] error in
                     Task { @MainActor in
@@ -454,6 +483,8 @@ final class Streamer: ObservableObject {
         // connect, and is deliberately NOT reset by a reconnect — a session (GO LIVE → END LIVE) survives drops.
         downtime = 0; drops = 0; connectedSince = nil; sessionSummary = nil
         downSince = nil; escalated2m = false; escalated5m = false; backoff = 1
+        warnedPhoneBattery = false; warnedThermal = false; warnedGlassesThermal = false
+        startHealthMonitoring()
         reconnectTask?.cancel()
 
         reconnectTask = Task {
@@ -604,6 +635,74 @@ final class Streamer: ObservableObject {
         UINotificationFeedbackGenerator().notificationOccurred(type)
     }
 
+    // MARK: health monitoring
+
+    /// Phone battery + thermal only matter while actually streaming (a 30-45 min walk is exactly when
+    /// the phone throttles or the battery runs down), so they're only observed live → stopLive() rather
+    /// than leaving isBatteryMonitoringEnabled and two NotificationCenter observers on for the app's life.
+    private func startHealthMonitoring() {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        updatePhoneBattery()
+        thermal = ProcessInfo.processInfo.thermalState
+        batteryObserver = NotificationCenter.default.addObserver(forName: UIDevice.batteryLevelDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.updatePhoneBattery() }
+        }
+        thermalObserver = NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.thermal = ProcessInfo.processInfo.thermalState }
+        }
+        // ponytail: only picks up the glasses connected at the moment Go Live is pressed — matches the
+        // file's documented usual order (start glasses, then go live). A glasses connect/reconnect mid-
+        // stream won't retroactively start this stream; upgrade path is hooking it off session creation
+        // in startGlasses() instead if that gap turns out to matter.
+        if let id = session?.deviceId {
+            glassesThermalTask = Task { [weak self] in
+                for await state in Wearables.shared.deviceStateStream(for: id) {
+                    self?.glassesThermal = state.thermalLevel
+                }
+            }
+        }
+    }
+
+    private func stopHealthMonitoring() {
+        if let o = batteryObserver { NotificationCenter.default.removeObserver(o) }
+        if let o = thermalObserver { NotificationCenter.default.removeObserver(o) }
+        batteryObserver = nil; thermalObserver = nil
+        UIDevice.current.isBatteryMonitoringEnabled = false
+        glassesThermalTask?.cancel()
+        glassesThermalTask = nil
+        glassesThermal = nil
+    }
+
+    private func updatePhoneBattery() {
+        let level = UIDevice.current.batteryLevel   // -1 while unknown/monitoring just turned on
+        phoneBattery = level < 0 ? nil : Int(level * 100)
+    }
+
+    private func checkPhoneBattery() {
+        guard let b = phoneBattery, b < 15, !warnedPhoneBattery else { return }
+        warnedPhoneBattery = true
+        speaker?.speakSystem("phone battery fifteen percent")
+    }
+
+    private func checkThermal() {
+        // ThermalState isn't Comparable; rawValue order is nominal < fair < serious < critical.
+        guard thermal.rawValue >= ProcessInfo.ThermalState.serious.rawValue, !warnedThermal else { return }
+        warnedThermal = true
+        speaker?.speakSystem("phone getting hot")
+    }
+
+    /// ThermalLevel is Equatable, not Comparable/rawValue-ordered — switch on the cases the 0.9 docs list
+    /// (unknown, none, light, moderate, severe, critical, emergency, shutdown) instead of guessing an order.
+    private func checkGlassesThermal() {
+        guard let t = glassesThermal, !warnedGlassesThermal else { return }
+        switch t {
+        case .severe, .critical, .emergency, .shutdown:
+            warnedGlassesThermal = true
+            speaker?.speakSystem("glasses getting hot")
+        default: break
+        }
+    }
+
     func stopLive() {
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -623,6 +722,7 @@ final class Streamer: ObservableObject {
         hot.transcoder = nil
         fallbackTask?.cancel()
         blackTask?.cancel(); blackTask = nil
+        stopHealthMonitoring()
         rtmpState = "stopped"
         Task {
             try? await mixer.attachVideo(nil)

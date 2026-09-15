@@ -1,4 +1,5 @@
 import SwiftUI
+import MWDATCore
 import AVFoundation
 import WebKit
 
@@ -167,6 +168,15 @@ struct ContentView: View {
                 } else {
                     pill("antenna.radiowaves.left.and.right", streamer.rtmpState, .gray)
                 }
+                if let pb = streamer.phoneBattery, pb < 30 {
+                    pill("battery.25", "phone \(pb)%", pb < 15 ? .orange : .white)
+                }
+                if let gt = streamer.glassesThermal, let heat = glassesHeat(gt) {
+                    pill("thermometer", "glasses \(heat)", heat == "warm" ? .white : .orange)
+                }
+                if streamer.thermal != .nominal {
+                    pill("thermometer", thermalLabel, streamer.thermal == .fair ? .white : .orange)
+                }
                 Button { tap(); cycleSource() } label: {
                     pill(streamer.source == "phone" ? "iphone" : "eyeglasses",
                          streamer.manualSource == "auto" ? "auto · \(streamer.source)" : streamer.manualSource,
@@ -206,6 +216,25 @@ struct ContentView: View {
         let order = ["auto", "glasses", "back", "front"]
         let i = order.firstIndex(of: streamer.manualSource) ?? 0
         streamer.setSource(order[(i + 1) % order.count])
+    }
+
+    /// nil below moderate — a pill that never clears is noise on a screen you glance at mid-walk.
+    private func glassesHeat(_ level: ThermalLevel) -> String? {
+        switch level {
+        case .moderate: return "warm"
+        case .severe: return "hot"
+        case .critical, .emergency, .shutdown: return "overheating"
+        default: return nil
+        }
+    }
+
+    private var thermalLabel: String {
+        switch streamer.thermal {
+        case .fair: return "warm"
+        case .serious: return "hot"
+        case .critical: return "overheating"
+        default: return "ok"
+        }
     }
 
     private var glassesColor: Color {
