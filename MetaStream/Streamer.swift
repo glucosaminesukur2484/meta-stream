@@ -57,6 +57,10 @@ final class Streamer: ObservableObject {
     @Published var teamID = "unknown (not sideloaded yet)"
     @Published var live = false { didSet { hot.live = live } }
     @Published var liveSince: Date?
+    @Published var connectedSince: Date?        // when the CURRENT connection went up; nil while down
+    @Published var downtime: TimeInterval = 0   // cumulative seconds this session spent not publishing
+    @Published var drops = 0                    // times the connection dropped this session
+    @Published var sessionSummary: String?      // set by stopLive(), e.g. "session 42:10, 1:48 down across 3 drops"
     @Published var devices = "none seen yet"
     @Published var source = "glasses" { didSet { syncHot(); applog("stream", "source=\(source) manual=\(manualSource)") } }   // what is going out right now
     @Published var manualSource = "auto"       // "auto" | "glasses" | "back" | "front" (user's choice)
@@ -89,6 +93,8 @@ final class Streamer: ObservableObject {
     private let hot = Hot()
     private lazy var sink = LayerSink(hot: hot)
     var pip: PiPController?                        // owned here so it outlives SwiftUI view rebuilds
+    // ponytail: plain optional, not weak — Speaker never references Streamer, so no retain cycle. App.swift sets it once.
+    var speaker: Speaker?
     private var lastFrames = 0
     private var lastBytes = 0
 
@@ -99,6 +105,11 @@ final class Streamer: ObservableObject {
     private var glassesStreaming = false
     private var fallbackTask: Task<Void, Never>?
     private var fallbackPosition: AVCaptureDevice.Position = .back
+    private var reconnectTask: Task<Void, Never>?   // covers first connect + every drop; cancelled by stopLive()
+    private var downSince: Date?                    // set while not connected — before the first connect too
+    private var escalated2m = false
+    private var escalated5m = false
+    private var backoff: TimeInterval = 1
 
     private let connection = RTMPConnection()          // advertises hvc1 in the enhanced-RTMP connect by default
     private lazy var stream = RTMPStream(connection: connection)
@@ -438,7 +449,14 @@ final class Streamer: ObservableObject {
         } else {
             hot.transcoder = nil
         }
-        Task {
+
+        // New session: reset the downtime/drop counters. liveSince is set once, below, on the first successful
+        // connect, and is deliberately NOT reset by a reconnect — a session (GO LIVE → END LIVE) survives drops.
+        downtime = 0; drops = 0; connectedSince = nil; sessionSummary = nil
+        downSince = nil; escalated2m = false; escalated5m = false; backoff = 1
+        reconnectTask?.cancel()
+
+        reconnectTask = Task {
             do {
                 // Meta docs: audio route must be settled before frames flow; do this before connect.
                 let audioSession = AVAudioSession.sharedInstance()
@@ -480,46 +498,126 @@ final class Streamer: ObservableObject {
                 Task { [connection] in                       // every NetConnection.* / NetStream.* status the server sends
                     for await st in await connection.status { applog("stream", "rtmp status: \(st.code) \(st.description)") }
                 }
-                // HaishinKit's own timeout doesn't always fire on a black-holed port; race the connect against a clock.
-                let conn = connection
-                try await withThrowingTaskGroup(of: Void.self) { g in
-                    g.addTask { _ = try await conn.connect(url) }
-                    g.addTask { try await Task.sleep(for: .seconds(12)); throw NSError(domain: "MetaStream", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not reach \(URL(string: url)?.host ?? url) within 12 s"]) }
-                    try await g.next()
-                    g.cancelAll()
-                }
-                applog("stream", "connected, publishing")
-                _ = try await stream.publish(key)
-                live = true
-                liveSince = Date()
-                rtmpState = "live"
-                evaluateSource()
 
-                Task { [weak self] in
-                    guard let self else { return }
-                    while self.live {
-                        try? await Task.sleep(for: .seconds(3))
-                        // ponytail: fixed 3 s retry, no backoff
-                        if !(await self.connection.connected) {
-                            self.rtmpState = "reconnecting"
-                            applog("stream", "reconnect attempt", error: true)
-                            _ = try? await self.connection.connect(url)
-                            _ = try? await self.stream.publish(key)
-                            if await self.connection.connected { self.rtmpState = "live" }
-                        }
-                    }
-                }
+                await superviseConnection(url: url, key: key)
             } catch {
-                applog("stream", "goLive failed: \(String(describing: error))", error: true)
+                applog("stream", "goLive setup failed: \(String(describing: error))", error: true)
                 rtmpState = error.localizedDescription
                 Task { try? await connection.close() }   // drop a half-open socket so the next attempt starts clean
             }
         }
     }
 
+    /// Connects + publishes, retrying with exponential backoff (1, 2, 4, 8 s, capped at 15 s) on any failure.
+    /// Covers the FIRST connect too — nothing here gives up, so a bad initial connect retries here instead of
+    /// dying in goLive's catch. Runs until stopLive() cancels reconnectTask.
+    private func superviseConnection(url: String, key: String) async {
+        while !Task.isCancelled {
+            do {
+                try await connectWithTimeout(url)
+                applog("stream", "connected, publishing")
+                _ = try await stream.publish(key)
+
+                let now = Date()
+                connectedSince = now
+                backoff = 1
+                if let since = downSince {
+                    if live {                                          // real recovery from a drop, not first connect
+                        downtime += now.timeIntervalSince(since)
+                        speaker?.stopRepeating(id: "rtmp", recovered: "stream back")
+                        haptic(.success)
+                    }
+                    downSince = nil
+                    escalated2m = false; escalated5m = false
+                }
+                rtmpState = "live"
+                if !live {                                              // first-ever connect this session
+                    live = true
+                    liveSince = now
+                    evaluateSource()
+                }
+            } catch {
+                if Task.isCancelled { return }
+                applog("stream", "connect failed: \(String(describing: error))", error: true)
+                if live {
+                    markDropped()
+                } else {
+                    if downSince == nil { downSince = Date() }          // clock starts even before ever connecting
+                    rtmpState = error.localizedDescription               // surface the first-connect error
+                }
+                checkEscalation()
+                try? await Task.sleep(for: .seconds(backoff))
+                backoff = min(backoff * 2, 15)
+                continue
+            }
+
+            // ponytail: poll `connected` every 2 s instead of parsing RTMPConnection status codes for the drop
+            // event — the status stream above is already logged separately for diagnostics.
+            while !Task.isCancelled, await connection.connected {
+                try? await Task.sleep(for: .seconds(2))
+            }
+            guard !Task.isCancelled else { return }
+            markDropped()
+        }
+    }
+
+    /// HaishinKit's own timeout doesn't always fire on a black-holed port; race the connect against a clock.
+    private func connectWithTimeout(_ url: String) async throws {
+        let conn = connection
+        try await withThrowingTaskGroup(of: Void.self) { g in
+            g.addTask { _ = try await conn.connect(url) }
+            g.addTask { try await Task.sleep(for: .seconds(12)); throw NSError(domain: "MetaStream", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not reach \(URL(string: url)?.host ?? url) within 12 s"]) }
+            try await g.next()
+            g.cancelAll()
+        }
+    }
+
+    /// First sign a LIVE connection is down: starts the downtime clock, counts the drop, speaks + buzzes once.
+    /// No-op if already marked — a failed reconnect attempt re-enters this after the poll loop already did.
+    private func markDropped() {
+        guard downSince == nil else { return }
+        downSince = Date()
+        drops += 1
+        rtmpState = "reconnecting"
+        applog("stream", "connection dropped, retrying", error: true)
+        speaker?.startRepeating(id: "rtmp", text: "stream dropped")   // re-speaks itself at 30s/60s/2min
+        haptic(.error)
+    }
+
+    /// Beyond Speaker's own 30s/60s/2min repeat cycle: one more nudge at 2 min down, another at 5 — so silence
+    /// never stretches on forever. Covers a drop AND a stream that never connected in the first place.
+    private func checkEscalation() {
+        guard let since = downSince else { return }
+        let elapsed = Date().timeIntervalSince(since)
+        if elapsed >= 300, !escalated5m {
+            escalated5m = true
+            speaker?.speakSystem("stream still down after 5 minutes, may need a manual restart")
+        } else if elapsed >= 120, !escalated2m {
+            escalated2m = true
+            speaker?.speakSystem("stream still down after 2 minutes")
+        }
+    }
+
+    /// Backgrounded (screen off, glasses-only) haptics are a no-op anyway; skip the allocation.
+    private func haptic(_ type: UINotificationFeedbackGenerator.FeedbackType) {
+        guard UIApplication.shared.applicationState == .active else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(type)
+    }
+
     func stopLive() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        if let since = downSince, live { downtime += Date().timeIntervalSince(since) }
+        downSince = nil
+        speaker?.stopRepeating(id: "rtmp")
+        if let start = liveSince {
+            let summary = "session \(Self.fmtClock(Date().timeIntervalSince(start))), \(Self.fmtClock(downtime)) down across \(drops) drops"
+            sessionSummary = summary
+            applog("stream", summary)
+        }
         live = false
         liveSince = nil
+        connectedSince = nil
         hot.warm = false
         hot.transcoder?.invalidate()
         hot.transcoder = nil
@@ -532,6 +630,12 @@ final class Streamer: ObservableObject {
         }
         source = "glasses"
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [])   // mic off, PiP stays armed
+    }
+
+    /// "m:ss" for the session summary, e.g. 1:48. Minutes aren't padded/capped — a long stream just reads "72:03".
+    private static func fmtClock(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds)
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 
     // MARK: devices status line
