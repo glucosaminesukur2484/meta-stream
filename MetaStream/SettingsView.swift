@@ -15,6 +15,7 @@ struct SettingsView: View {
     @AppStorage("fallbackCamera") var fallbackCamera = "back"
     @AppStorage("keepAwake") var keepAwake = true
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
+    @AppStorage("codec") var codec = "auto"
     @State private var showKey = false
 
     // Ingest URLs. Instagram and TikTok hand out a per-stream URL in their own tools, so they stay "custom".
@@ -25,7 +26,7 @@ struct SettingsView: View {
         "restream": "rtmp://live.restream.io/live",
     ]
     private static let hints: [String: String] = [
-        "kick": "Kick accepts up to 8000 kbps.",
+        "kick": "Kick accepts up to 8000 kbps, H.264 only.",
         "twitch": "Twitch: up to 6000 kbps (8000 for Partners). HEVC only for Affiliates/Partners.",
         "youtube": "YouTube: up to ~9000 kbps at 1080p. Create the stream in YouTube Studio first.",
         "restream": "Restream re-encodes to H.264 for every destination, so Twitch works even without Affiliate.",
@@ -58,13 +59,16 @@ struct SettingsView: View {
                         Button { showKey.toggle() } label: { Image(systemName: showKey ? "eye.slash" : "eye") }
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                     }
+                    Picker("Video codec", selection: $codec) {
+                        Text("Auto").tag("auto"); Text("HEVC (passthrough)").tag("hevc"); Text("H.264 (transcode)").tag("h264")
+                    }
                     VStack(alignment: .leading, spacing: 4) {
                         HStack { Text("Bitrate"); Spacer(); Text(String(bitrateKbps) + " kbps").monospacedDigit().foregroundStyle(.secondary) }
                         Slider(value: Binding(get: { Double(bitrateKbps) }, set: { bitrateKbps = Int($0 / 250) * 250 }),
                                in: 1000...9000, step: 250)
                     }
                 } header: { Text("Destination") } footer: {
-                    Text((Self.hints[platform] ?? "") + "\nBitrate applies to phone-camera and camera-off video; the glasses choose their own HEVC bitrate.")
+                    Text((Self.hints[platform] ?? "") + "\nAuto picks H.264 for Kick and Twitch (they don't take HEVC) and passthrough elsewhere. H.264 re-encodes on the phone at the bitrate below; HEVC passthrough keeps the glasses' own bitrate.")
                 }
 
                 Section("Chat") {

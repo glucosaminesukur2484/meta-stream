@@ -66,6 +66,10 @@ struct ContentView: View {
     @AppStorage("fallbackCamera") var fallbackCamera = "back"
     @AppStorage("keepAwake") var keepAwake = true
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
+    @AppStorage("codec") var codecPref = "auto"
+    @AppStorage("platform") var platformPref = "kick"
+    /// auto: Kick and Twitch refuse or gate HEVC, everyone else takes the untouched glasses stream.
+    private var codec: String { codecPref == "auto" ? (["kick", "twitch"].contains(platformPref) ? "h264" : "hevc") : codecPref }
 
     @State private var showSettings = false
     @State private var showChat = false
@@ -233,7 +237,7 @@ struct ContentView: View {
                 } else {
                     streamer.goLive(url: rtmpURL, key: streamKey, micUID: micUID,
                                     fallbackPosition: fallbackCamera == "front" ? .front : .back,
-                                    bitrateKbps: bitrateKbps)
+                                    bitrateKbps: bitrateKbps, codec: codec)
                 }
             } label: {
                 ZStack {

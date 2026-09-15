@@ -21,6 +21,7 @@ private final class Hot: @unchecked Sendable {
     var forward = true                 // source == "glasses" && !cameraOff
     var frames = 0
     var bytes = 0
+    var transcoder: Transcoder?         // non-nil = decode HEVC → H.264 encoder instead of passthrough
     weak var preview: AVSampleBufferDisplayLayer?
 }
 
@@ -219,7 +220,8 @@ final class Streamer: ObservableObject {
                     hot.frames += 1
                     hot.bytes += CMSampleBufferGetTotalSampleSize(sb)
                     if hot.live && hot.forward {
-                        Task { await rtmp.append(sb) }                        // compressed → passthrough, no encode
+                        if let t = hot.transcoder { t.decode(sb) }            // H.264 mode: decode → mixer → encoder
+                        else { Task { await rtmp.append(sb) } }               // HEVC mode: passthrough, no encode
                     }
                     if let preview = hot.preview {                            // AVSampleBufferDisplayLayer is thread-safe
                         if preview.status == .failed { preview.flush() }
@@ -375,8 +377,18 @@ final class Streamer: ObservableObject {
     // MARK: RTMP
 
     /// bitrateKbps applies to what HaishinKit encodes (phone camera, black frames); the glasses set their own HEVC bitrate.
-    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position, bitrateKbps: Int = 4000) {
+    /// codec: "hevc" passes the glasses' stream through untouched (YouTube, Restream, own relay);
+    /// "h264" decodes and re-encodes on the phone (Kick, Twitch without Affiliate). Phone-camera video follows the same choice.
+    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position, bitrateKbps: Int = 4000, codec: String = "hevc") {
         self.fallbackPosition = fallbackPosition
+        let h264 = codec == "h264"
+        hot.transcoder?.invalidate()
+        if h264 {
+            let mixer = self.mixer
+            hot.transcoder = Transcoder { sb in Task { await mixer.append(sb) } }
+        } else {
+            hot.transcoder = nil
+        }
         Task {
             do {
                 // Meta docs: audio route must be settled before frames flow; do this before connect.
@@ -390,16 +402,18 @@ final class Streamer: ObservableObject {
                 if !muted { try await mixer.attachAudio(AVCaptureDevice.default(for: .audio)) }
                 await wireMixer()
 
-                // profileLevel containing "HEVC" flips HaishinKit's internal format to .hevc (onMetaData codec id)
-                // and makes the fallback-camera encoder produce HEVC too.
+                // profileLevel containing "HEVC" flips HaishinKit's internal format to .hevc (onMetaData codec id);
+                // the encoder handles phone-camera video, black frames and, in H.264 mode, the decoded glasses frames.
                 try? await stream.setVideoSettings(VideoCodecSettings(
                     videoSize: CGSize(width: 720, height: 1280),
                     bitRate: bitrateKbps * 1000,
-                    profileLevel: kVTProfileLevel_HEVC_Main_AutoLevel as String,
+                    profileLevel: (h264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel) as String,
+                    maxKeyFrameIntervalDuration: 2,
                     expectedFrameRate: 30))
+                if h264 { await wireMixer() }             // decoded frames need the mixer → encoder → stream path
                 try? await stream.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
 
-                applog("stream", "connecting to \(url) key=\(key.count) chars, mic=\(micUID.isEmpty ? "default" : micUID), bitrate=\(bitrateKbps)")
+                applog("stream", "connecting to \(url) key=\(key.count) chars, mic=\(micUID.isEmpty ? "default" : micUID), bitrate=\(bitrateKbps), codec=\(codec)")
                 Task { await Self.netProbe(url) }        // logs which interface iOS picks and whether the host answers on it
                 Task { [connection] in                       // every NetConnection.* / NetStream.* status the server sends
                     for await st in await connection.status { applog("stream", "rtmp status: \(st.code) \(st.description)") }
@@ -444,6 +458,8 @@ final class Streamer: ObservableObject {
     func stopLive() {
         live = false
         liveSince = nil
+        hot.transcoder?.invalidate()
+        hot.transcoder = nil
         fallbackTask?.cancel()
         blackTask?.cancel(); blackTask = nil
         rtmpState = "stopped"
@@ -472,6 +488,12 @@ final class Streamer: ObservableObject {
         devices = list.isEmpty ? "none" : list.joined(separator: ", ")
     }
 
+    /// Resumes a continuation at most once across competing callbacks.
+    private final class Once: @unchecked Sendable {
+        private let lock = NSLock(); private var done = false
+        func fire() -> Bool { lock.lock(); defer { lock.unlock() }; if done { return false }; done = true; return true }
+    }
+
     /// Diagnostic: current network path + TCP reachability of the ingest host over the default route and over cellular only.
     private static func netProbe(_ urlString: String) async {
         guard let u = URL(string: urlString), let host = u.host else { return }
@@ -486,18 +508,17 @@ final class Streamer: ObservableObject {
             if let required { params.requiredInterfaceType = required }
             let conn = NWConnection(host: .init(host), port: .init(rawValue: port)!, using: params)
             let result: String = await withCheckedContinuation { c in
-                var done = false
+                let once = Once()
                 conn.stateUpdateHandler = { st in
-                    guard !done else { return }
                     switch st {
-                    case .ready: done = true; c.resume(returning: "ready via \(conn.currentPath?.availableInterfaces.first.map { "\($0.type)" } ?? "?")")
-                    case .failed(let e): done = true; c.resume(returning: "failed: \(e)")
+                    case .ready: if once.fire() { c.resume(returning: "ready via \(conn.currentPath?.availableInterfaces.first.map { "\($0.type)" } ?? "?")") }
+                    case .failed(let e): if once.fire() { c.resume(returning: "failed: \(e)") }
                     case .waiting(let e): applog("stream", "probe \(label) waiting: \(e)")
                     default: break
                     }
                 }
                 conn.start(queue: .global())
-                DispatchQueue.global().asyncAfter(deadline: .now() + 6) { if !done { done = true; c.resume(returning: "timeout 6 s") } }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 6) { if once.fire() { c.resume(returning: "timeout 6 s") } }
             }
             conn.cancel()
             applog("stream", "probe \(label) \(host):\(port) -> \(result)", error: !result.hasPrefix("ready"))
