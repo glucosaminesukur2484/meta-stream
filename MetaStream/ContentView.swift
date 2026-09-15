@@ -41,7 +41,8 @@ struct ContentView: View {
     @AppStorage("streamKey") var streamKey = ""
     @AppStorage("chatChannel") var chatChannel = ""
     @AppStorage("chatSite") var chatSite = "kick"
-    @AppStorage("glassesMic") var glassesMic = false
+    @AppStorage("micUID") var micUID = ""
+    @AppStorage("fallbackCamera") var fallbackCamera = "back"
     @State private var showSettings = false
     @State private var glassesOn = false
 
@@ -60,7 +61,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Meta: \(streamer.registration)   Glasses: \(streamer.glassesState)")
                 Text("Devices: \(streamer.devices)")
-                Text("RTMP: \(streamer.rtmpState)   frames: \(streamer.frames)")
+                Text("RTMP: \(streamer.rtmpState)   frames: \(streamer.frames)   source: \(streamer.source)")
                 Text("Apple Team ID: \(streamer.teamID)")
             }
             .font(.system(.caption, design: .monospaced))
@@ -76,7 +77,8 @@ struct ContentView: View {
                 }
                 Button(streamer.live ? "Stop live" : "3. Go live") {
                     streamer.live ? streamer.stopLive()
-                        : streamer.goLive(url: rtmpURL, key: streamKey, glassesMic: glassesMic)
+                        : streamer.goLive(url: rtmpURL, key: streamKey, micUID: micUID,
+                                          fallbackPosition: fallbackCamera == "front" ? .front : .back)
                 }
                 .tint(streamer.live ? .red : .green)
             }
@@ -96,7 +98,13 @@ struct ContentView: View {
                         TextField("channel name", text: $chatChannel)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                     }
-                    Toggle("Use glasses mic (8 kHz)", isOn: $glassesMic)
+                    Picker("Microphone", selection: $micUID) {
+                        Text("Default").tag("")
+                        ForEach(streamer.mics) { Text($0.name).tag($0.id) }
+                    }
+                    Picker("Fallback camera", selection: $fallbackCamera) {
+                        Text("Back").tag("back"); Text("Front").tag("front")
+                    }.pickerStyle(.segmented)
                 }
                 .textFieldStyle(.roundedBorder)
                 .padding(.top, 4)

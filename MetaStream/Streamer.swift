@@ -8,6 +8,8 @@ import MWDATCamera
 import HaishinKit
 import RTMPHaishinKit
 
+struct Mic: Identifiable, Hashable { let id: String; let name: String }   // id = AVAudioSessionPortDescription.uid
+
 @MainActor
 final class Streamer: ObservableObject {
     @Published var registration = "unknown"
@@ -17,13 +19,19 @@ final class Streamer: ObservableObject {
     @Published var teamID = "unknown (not sideloaded yet)"
     @Published var live = false
     @Published var devices = "none seen yet"
+    @Published var source = "glasses"          // "glasses" | "phone" (fallback camera while glasses are down)
+    @Published var mics: [Mic] = []
 
     // ponytail: ContentView sets this directly instead of a delegate protocol.
     weak var preview: AVSampleBufferDisplayLayer?
 
     private var session: DeviceSession?
     private var camera: Camera?
-    private var tokens: [any AnyListenerToken] = []   // SDK listeners die when their token is released
+    private var tokens: [any AnyListenerToken] = []        // SDK listeners die when their token is released
+    private var deviceTokens: [any AnyListenerToken] = []  // per-device link/compat listeners
+    private var glassesStreaming = false
+    private var fallbackTask: Task<Void, Never>?
+    private var fallbackPosition: AVCaptureDevice.Position = .back
 
     private let connection = RTMPConnection()          // advertises hvc1 in the enhanced-RTMP connect by default
     private lazy var stream = RTMPStream(connection: connection)
@@ -31,6 +39,7 @@ final class Streamer: ObservableObject {
 
     init() {
         teamID = Self.readTeamID()
+        refreshMics()
         Task { [weak self] in
             for await state in Wearables.shared.registrationStateStream() {
                 self?.registration = state.description
@@ -38,12 +47,17 @@ final class Streamer: ObservableObject {
         }
         Task { [weak self] in
             for await ids in Wearables.shared.devicesStream() {
-                let list = ids.compactMap { Wearables.shared.deviceForIdentifier($0) }
-                    .map { "\($0.nameOrId()) \($0.linkState) \($0.compatibility())" }
-                self?.devices = list.isEmpty ? "none" : list.joined(separator: ", ")
+                self?.watchDevices(ids)
+            }
+        }
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: AVAudioSession.routeChangeNotification) {
+                self?.refreshMics()
             }
         }
     }
+
+    // MARK: glasses
 
     func register() {
         Task {
@@ -110,16 +124,26 @@ final class Streamer: ObservableObject {
                 self.camera = camera
 
                 tokens.append(camera.stream.statePublisher.listen { [weak self] state in
-                    Task { @MainActor in self?.glassesState = "stream \(state)" }
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.glassesState = "stream \(state)"
+                        self.glassesStreaming = (state == .streaming)
+                        self.evaluateSource()
+                    }
                 })
                 tokens.append(camera.stream.errorPublisher.listen { [weak self] error in
-                    Task { @MainActor in self?.glassesState = "stream error: \(error.description)" }
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.glassesState = "stream error: \(error.description)"
+                        self.glassesStreaming = false
+                        self.evaluateSource()
+                    }
                 })
                 tokens.append(camera.stream.videoFramePublisher.listen { [weak self] frame in
                     Task { @MainActor in
                         guard let self else { return }
                         self.frames += 1
-                        if self.live {
+                        if self.live && self.source == "glasses" {
                             Task { await self.stream.append(frame.sampleBuffer) }   // compressed → passthrough, no encode
                         }
                         if let preview = self.preview {
@@ -145,24 +169,75 @@ final class Streamer: ObservableObject {
         camera = nil
         session = nil
         tokens.removeAll()
+        glassesStreaming = false
         glassesState = "stopped"
+        evaluateSource()
     }
 
-    func goLive(url: String, key: String, glassesMic: Bool) {
+    // MARK: fallback camera (StreamHand-style: glasses drop → phone camera, glasses back → glasses)
+
+    private func evaluateSource() {
+        fallbackTask?.cancel()
+        guard live else { return }
+        if glassesStreaming {
+            if source == "phone" { Task { await switchTo(glasses: true) } }
+        } else if source == "glasses" {
+            fallbackTask = Task { [weak self] in        // ponytail: 2 s debounce, no hysteresis
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, !Task.isCancelled, self.live, !self.glassesStreaming else { return }
+                await self.switchTo(glasses: false)
+            }
+        }
+    }
+
+    private func switchTo(glasses: Bool) async {
+        do {
+            if glasses {
+                try await mixer.attachVideo(nil)
+                source = "glasses"
+            } else {
+                // Encoded by HaishinKit as HEVC 720x1280 (see setVideoSettings), same codec as the glasses,
+                // so the RTMP stream never changes format. Phone capture pauses in background; glasses HEVC doesn't.
+                let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: fallbackPosition)
+                try await mixer.attachVideo(cam)
+                await mixer.setVideoOrientation(.portrait)
+                source = "phone"
+            }
+        } catch {
+            rtmpState = "camera switch: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: audio inputs
+
+    func refreshMics() {
+        let s = AVAudioSession.sharedInstance()
+        // allowBluetoothHFP is what makes the glasses show up as an input.
+        try? s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+        try? s.setActive(true)
+        mics = (s.availableInputs ?? []).map { Mic(id: $0.uid, name: $0.portName) }
+    }
+
+    // MARK: RTMP
+
+    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position) {
+        self.fallbackPosition = fallbackPosition
         Task {
             do {
                 // Meta docs: audio route must be settled before frames flow; do this before connect.
-                var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker]
-                if glassesMic { options.insert(.allowBluetoothHFP) }
                 let audioSession = AVAudioSession.sharedInstance()
-                try audioSession.setCategory(.playAndRecord, mode: .default, options: options)
+                try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+                if let port = audioSession.availableInputs?.first(where: { $0.uid == micUID }) {
+                    try audioSession.setPreferredInput(port)
+                }
                 try audioSession.setActive(true)
 
                 try await mixer.attachAudio(AVCaptureDevice.default(for: .audio))
                 await mixer.addOutput(stream)
                 await mixer.startRunning()
 
-                // profileLevel containing "HEVC" flips HaishinKit's internal format to .hevc (onMetaData codec id).
+                // profileLevel containing "HEVC" flips HaishinKit's internal format to .hevc (onMetaData codec id)
+                // and makes the fallback-camera encoder produce HEVC too.
                 try? await stream.setVideoSettings(VideoCodecSettings(
                     videoSize: CGSize(width: 720, height: 1280),
                     bitRate: 4_000_000,
@@ -174,6 +249,7 @@ final class Streamer: ObservableObject {
                 _ = try await stream.publish(key)
                 live = true
                 rtmpState = "live"
+                evaluateSource()
 
                 Task { [weak self] in
                     guard let self else { return }
@@ -196,9 +272,31 @@ final class Streamer: ObservableObject {
 
     func stopLive() {
         live = false
+        fallbackTask?.cancel()
         rtmpState = "stopped"
-        Task { try? await connection.close() }
+        Task {
+            try? await mixer.attachVideo(nil)
+            try? await connection.close()
+        }
+        source = "glasses"
         try? AVAudioSession.sharedInstance().setActive(false)
+    }
+
+    // MARK: devices status line
+
+    private func watchDevices(_ ids: [DeviceIdentifier]) {
+        let list = ids.compactMap { Wearables.shared.deviceForIdentifier($0) }
+        deviceTokens = list.flatMap { d in
+            [d.addLinkStateListener { [weak self] _ in Task { @MainActor in self?.describeDevices() } },
+             d.addCompatibilityListener { [weak self] _ in Task { @MainActor in self?.describeDevices() } }]
+        }
+        describeDevices()
+    }
+
+    private func describeDevices() {
+        let list = Wearables.shared.devices.compactMap { Wearables.shared.deviceForIdentifier($0) }
+            .map { "\($0.nameOrId()) \($0.linkState) \($0.compatibility())" }
+        devices = list.isEmpty ? "none" : list.joined(separator: ", ")
     }
 
     // Free Apple IDs get a "personal team"; its ID is only visible inside the signed app's provisioning profile.
