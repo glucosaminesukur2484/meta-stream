@@ -59,7 +59,7 @@ struct SettingsView: View {
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                     }
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack { Text("Bitrate"); Spacer(); Text("\(bitrateKbps) kbps").monospacedDigit().foregroundStyle(.secondary) }
+                        HStack { Text("Bitrate"); Spacer(); Text(String(bitrateKbps) + " kbps").monospacedDigit().foregroundStyle(.secondary) }
                         Slider(value: Binding(get: { Double(bitrateKbps) }, set: { bitrateKbps = Int($0 / 250) * 250 }),
                                in: 1000...9000, step: 250)
                     }

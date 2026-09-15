@@ -1,111 +1,194 @@
-# MetaStream
+<p align="center">
+  <img src="MetaStream/Assets.xcassets/AppIcon.appiconset/AppIcon.png" width="120" alt="MetaStream icon">
+</p>
 
-Ray-Ban Meta Gen 2 glasses → Kick/Twitch/custom RTMP, with chat, built and
-signed entirely without a Mac. See the plan doc for design rationale; this is
-the operational checklist.
+<h1 align="center">MetaStream</h1>
 
-## Setup checklist (one-time)
+<p align="center">
+  IRL streaming from <b>Ray-Ban Meta</b> glasses to Kick, Twitch, YouTube, Restream or any RTMP server —<br>
+  with chat, a stream manager, and a phone-camera fallback. Built and signed from <b>Windows</b>, no Mac needed.
+</p>
 
-1. **Meta developer account.** Sign up at https://wearables.developer.meta.com.
-   Create a project named `MetaStream`, platform iOS, bundle ID
-   `com.saeedkolivand.metastream` (no hyphens allowed in the bundle ID — Meta firmware
-   rule). Leave Apple Team ID blank for now; you'll fill it in during the
-   bootstrap build (step 4). Copy the **MetaAppID** and **ClientToken** it
-   gives you.
-2. **Enable Developer Mode in the Meta AI app.** Settings → App Info → tap
-   the version number 5 times → Developer Mode toggles on.
-3. **Check firmware/app versions.** Glasses firmware ≥ v126, Meta AI app ≥
-   V282. Update either from the Meta AI app if below that.
-4. **GitHub repo.** Create a public repo, push this project, then add three
-   repo secrets (Settings → Secrets and variables → Actions):
-   - `META_APP_ID`
-   - `CLIENT_TOKEN`
-   - `TEAM_ID` (leave empty for the first run — see bootstrap below)
-5. **Windows prerequisites.** Install iTunes and iCloud from
-   https://apple.com (NOT the Microsoft Store versions — they don't expose
-   the drivers Sideloadly needs), then install Sideloadly from
-   https://sideloadly.io.
-6. **iPhone Developer Mode.** Settings → Privacy & Security → Developer Mode
-   → on (requires a restart).
+<p align="center">
+  <a href="https://github.com/saeedkolivand/meta-stream/actions/workflows/build.yml"><img src="https://github.com/saeedkolivand/meta-stream/actions/workflows/build.yml/badge.svg" alt="build"></a>
+  <img src="https://img.shields.io/badge/iOS-17.2%2B-black" alt="iOS 17.2+">
+  <img src="https://img.shields.io/badge/Meta%20DAT%20SDK-0.9.0-blue" alt="DAT 0.9.0">
+  <img src="https://img.shields.io/badge/video-HEVC%20passthrough-purple" alt="HEVC">
+</p>
 
-## Signing (why a paid Apple team is needed)
+<p align="center">
+  <img src="docs/screenshots/live.png" width="220" alt="Live screen">
+  <img src="docs/screenshots/settings.png" width="220" alt="Settings">
+  <img src="docs/screenshots/manager.png" width="220" alt="Stream Manager">
+</p>
 
-Since DAT SDK 0.8 the glasses' video travels over a Wi-Fi link that needs two
-entitlements, `com.apple.developer.networking.HotspotConfiguration` and
-`com.apple.developer.networking.wifi-info` (see `MetaStream/MetaStream.entitlements`).
-A free Apple ID cannot sign those, so Sideloadly builds connect over Bluetooth
-but never stream. The workflow therefore signs in CI with a development
-certificate + profile from a paid team. Repo secrets:
+---
 
-- `P12_BASE64` / `P12_PASSWORD`: the Apple Development identity, exported from
-  Keychain Access as .p12 and base64-encoded.
-- `PROVISIONING_PROFILE_BASE64`: an "iOS App Development" profile for the
-  bundle ID with both capabilities enabled and your iPhone's UDID, base64-encoded.
-- `TEAM_ID`: the team ID of that paid team (also goes into the Meta developer
-  center and the MWDAT plist entry).
+## Why this exists
 
-Install the signed IPA over USB from Windows (no Sideloadly, no 7-day expiry):
+The apps that can talk to Meta glasses (StreamHand, MetaLens…) can't show chat, drop the glasses the moment you
+switch apps, and can't manage your broadcast. The apps that do all that (Streamlabs…) can't see the glasses.
+MetaStream is the missing middle, written for one streamer's own use and published so others can build their own copy.
 
-```
-pip install pymobiledevice3
-pymobiledevice3 apps install build/MetaStream.ipa
-```
+## What it does
 
-## Bootstrap Team ID (only for the free-Apple-ID path, historical)
-
-The Info.plist needs your Apple Team ID, but you don't know it until you've
-signed once with your free Apple ID.
-
-1. Run the `build-ipa` workflow (Actions tab → Run workflow) with the
-   `TEAM_ID` secret empty. The build still succeeds; expect a `TEAM_ID secret
-   empty` warning in the log — that's expected for this bootstrap build.
-2. Download the `MetaStream-ipa` artifact, sideload it with Sideloadly
-   (sign in with your free Apple ID), install over USB, open the app.
-3. The app shows your Apple Team ID on screen. Copy it into the `TEAM_ID`
-   GitHub secret.
-4. Re-run the workflow. This second IPA is the real one — reinstall it.
-
-## Weekly re-sign
-
-Free Apple ID certs expire after 7 days. Turn on Sideloadly's "Wi-Fi auto
-refresh" so it re-signs automatically; otherwise plug the phone in and click
-Start again in Sideloadly before the week is up. Free accounts are capped at
-3 sideloaded apps.
-
-## Going live
-
-- Kick: stream URL `rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/`
-  + your stream key. Chat popout: `https://kick.com/popout/<you>/chat`.
-- Twitch (affiliate/partner only in v1, see limitations):
-  `rtmps://live.twitch.tv:443/app/`. Chat popout:
-  `https://www.twitch.tv/popout/<you>/chat`.
-
-## Limitations (v1)
-
-| Limitation | Why |
+| | |
 |---|---|
-| 720x1280 portrait, 30 fps max | Hard cap of the DAT SDK's camera stream. |
-| Twitch only if affiliate/partner | Twitch requires HEVC senders to be Partner/Affiliate tier; everyone else needs H.264, which isn't implemented yet. v1 targets Kick and custom RTMP servers. |
-| One registered app at a time | The glasses only allow one third-party app registered in Developer Mode. Registering MetaStream unregisters StreamHand (or vice versa). |
-| Glasses mic is 8 kHz mono | Bluetooth HFP audio quality is a hardware/protocol limit. Default is the phone mic; toggle to glasses mic if you want it anyway. |
+| **Glasses video** | Official Meta *Wearables Device Access Toolkit*; compressed HEVC straight from the glasses, 720×1280 up to 30 fps |
+| **Keeps streaming in the background** | Check chat, answer a text, open Maps — the stream never stops |
+| **Zero re-encoding** | HEVC is passed through to RTMP untouched, so the phone stays cool and the battery lasts |
+| **Phone-camera fallback** | Glasses disconnect → back or front camera takes over within 2 s, same codec, no stream restart. Switch manually any time |
+| **Chat** | Kick, Twitch, YouTube or Restream chat in a slide-up sheet over the preview |
+| **Stream Manager** | Log in to Kick / Twitch / Restream / YouTube inside the app: edit title & category, see viewers, send chat, pull your stream key automatically |
+| **Destinations** | Presets for Kick, Twitch, YouTube, Restream; Instagram, TikTok and any custom RTMP/RTMPS |
+| **Controls** | Go Live / End, mic mute, camera off (black frames), photo capture to Photos, quality, bitrate, mic picker, keep-awake, live HUD with fps / kbps / timer |
+
+### Limits you should know
+
+- **720×1280 portrait @ 30 fps max.** That is the SDK's ceiling for every third-party app.
+- **Twitch accepts HEVC only from Affiliates/Partners.** Everyone else: stream to Restream (it re-encodes to H.264) or to your own relay.
+- **Paid Apple Developer team required** for the build — see [Why a paid Apple team](#why-a-paid-apple-team).
+- One third-party app can be registered with the glasses at a time; registering MetaStream unregisters e.g. StreamHand.
+- Glasses microphone is Bluetooth HFP (8 kHz). Default is the phone mic; pick any input in Settings.
+
+## How it works
+
+```mermaid
+flowchart LR
+  G[Ray-Ban Meta glasses] -- "Wi-Fi link (DAT SDK)<br/>HEVC 720x1280" --> A
+  P[Phone camera<br/>fallback / manual] -- "HaishinKit encoder<br/>HEVC" --> A
+  M[Microphone<br/>phone / glasses / headset] -- AAC --> A
+  A[MetaStream<br/>RTMPStream passthrough] -- "RTMPS (Enhanced RTMP)" --> K[Kick]
+  A --> T[Twitch]
+  A --> Y[YouTube]
+  A --> R[Restream → everywhere]
+  A --> C[Custom RTMP / own relay → OBS]
+  A <-- "OAuth / REST" --> APIs[Kick · Twitch · Restream · YouTube APIs<br/>title, category, viewers, chat, stream key]
+```
+
+Everything is one SwiftUI app: `Streamer.swift` (glasses + RTMP + fallback), `Platforms.swift` (logins and APIs),
+`ContentView.swift` / `SettingsView.swift` / `StreamManagerView.swift` (UI). No server, no backend: platform tokens
+stay on the phone.
+
+---
+
+## Build your own copy
+
+You need: a pair of Ray-Ban Meta (Gen 1/2, Display, Oakley Meta), an iPhone on iOS 17.2+, the Meta AI app, a
+GitHub account, and access to a **paid Apple Developer team** (yours, or a friend who exports a development
+certificate for you). No Mac is required at any point — GitHub's macOS runners do the compiling.
+
+### 1. Fork and rename
+
+Fork this repo. Pick a bundle ID (**no hyphens**, Meta rejects them) and replace `com.saeedkolivand.metastream` in
+`project.yml`, `MetaStream/Info.plist` and `MetaStream/Platforms.swift`. Replace `metastream.iamsaeed.dev` in
+`Platforms.swift` with your redirect page host (step 5).
+
+### 2. Meta Wearables Developer Center
+
+1. Sign up at <https://wearables.developer.meta.com> and create a project. Bundle ID = yours, Apple Team ID = the paid
+   team's ID, Universal link = `metastream://`. Enable the **Camera** permission with a rationale.
+2. Copy **MetaAppID** and **ClientToken** (shown under *Application ID*).
+3. In the Meta AI app: *Settings → App Info → tap the version 5× → Developer Mode on*. Glasses firmware ≥ v126, Meta AI ≥ V282.
+
+### 3. Apple signing (the paid-team part)
+
+In <https://developer.apple.com/account> → Certificates, Identifiers & Profiles:
+
+1. **Devices** → register your iPhone's UDID (`pip install pymobiledevice3` → `pymobiledevice3 usbmux list`).
+2. **Identifiers** → App ID with your bundle ID; enable **Access Wi-Fi Information** and **Hotspot**.
+3. **Profiles** → *iOS App Development* profile for that App ID, your device, an Apple Development certificate → download.
+4. Export that certificate **with its private key** from Keychain Access as a `.p12`.
+
+### 4. Platform apps (optional, one per platform you want in Stream Manager)
+
+| Platform | Where | Settings |
+|---|---|---|
+| Kick | kick.com → Settings → Developer (2FA required) | Redirect `https://<your-redirect-host>/oauth.html`, all scopes |
+| Twitch | <https://dev.twitch.tv/console> | Redirect `http://localhost`, client type **Public** (device-code login, no secret) |
+| Restream | <https://developers.restream.io/apps> | Redirect `https://<your-redirect-host>/oauth.html`, all permissions |
+| YouTube | <https://console.cloud.google.com> | Enable *YouTube Data API v3*; OAuth consent screen (Testing, add yourself as test user); OAuth client of type **iOS** with your bundle ID |
+
+### 5. Redirect page
+
+Kick and Restream require an `https` redirect. `docs/oauth.html` is a static page that bounces the browser back
+into the app. Serve it with GitHub Pages (*Settings → Pages → Deploy from branch → `main` `/docs`*), optionally
+behind a custom domain (add a `CNAME` record → `<you>.github.io`, **DNS only**).
+
+### 6. Secrets
+
+*Settings → Secrets and variables → Actions* in your fork:
+
+| Secret | Value |
+|---|---|
+| `META_APP_ID`, `CLIENT_TOKEN` | from step 2 |
+| `TEAM_ID` | the paid team's 10-character Team ID |
+| `P12_BASE64`, `P12_PASSWORD` | `base64 -w0 cert.p12`, and its export password |
+| `PROVISIONING_PROFILE_BASE64` | `base64 -w0 profile.mobileprovision` |
+| `IPA_PASSWORD` | any long random string; encrypts the build artifact (public repo) |
+| `KICK_CLIENT_ID`, `KICK_CLIENT_SECRET`, `TWITCH_CLIENT_ID`, `RESTREAM_CLIENT_ID`, `RESTREAM_CLIENT_SECRET`, `YOUTUBE_CLIENT_ID` | from step 4, only the ones you created |
+
+### 7. Build and install (from Windows, Linux or macOS)
+
+Push to `main` or run the *build-ipa* workflow. Then:
+
+```bash
+pip install pymobiledevice3                      # once
+gh run download -n MetaStream-ipa -D build       # latest artifact
+openssl enc -d -aes-256-cbc -pbkdf2 -in build/MetaStream.ipa.enc -out build/MetaStream.ipa -pass pass:'<IPA_PASSWORD>'
+pymobiledevice3 apps install build/MetaStream.ipa   # phone unlocked, on USB
+```
+
+First launch: *Settings → General → VPN & Device Management → trust the developer*. The development profile is valid
+for a year; rebuilds install over the previous version and keep your settings.
+
+---
+
+## Using it
+
+1. **Register** (first-run card) → approve in Meta AI → back in the app.
+2. **Manage** pill → connect a platform → *Use for streaming* fills the RTMP URL, stream key and chat for you.
+   Or type them in **Settings**.
+3. **Glasses** button → LED on, preview live. **GO LIVE**.
+4. Top pills: tap the source pill to cycle *auto → glasses → back camera → front camera*; tap mic / cam to mute or
+   black out; tap the glasses pill for raw diagnostics.
+5. **Chat** button slides chat over the preview. Settings has quality (resolution / fps), bitrate for phone-camera
+   video, microphone, fallback camera, keep-awake.
+
+## Why a paid Apple team
+
+Since DAT SDK 0.8 the glasses send video over a direct Wi-Fi link, and joining it needs two entitlements —
+`com.apple.developer.networking.HotspotConfiguration` and `com.apple.developer.networking.wifi-info` — that Apple only
+grants to paid teams. A free Apple ID (Sideloadly, AltStore…) produces a build that registers and connects over
+Bluetooth but never receives a frame. This is a platform rule, not something the app can work around.
 
 ## Troubleshooting
 
-- **"Internal error" during Meta registration**, seen on iPhone 17e / iOS
-  26.5.1: known SDK bug, tracked at
-  https://github.com/facebook/meta-wearables-dat-ios/issues/205. Nothing to
-  fix in this app; retry, or use a different iPhone/iOS version if it
-  persists.
-- **"Device unavailable" immediately after starting a glasses session**, on
-  SDK 0.9.0: known bug, tracked at
-  https://github.com/facebook/meta-wearables-dat-ios/issues/292. Workaround:
-  set `exactVersion: 0.8.0` for the DAT package in `project.yml`, run
-  `xcodegen generate` again, and rebuild.
+| Symptom | Cause / fix |
+|---|---|
+| Glasses pill stuck on *connecting*, frames 0 | Missing Wi-Fi entitlements → build signed with a free Apple ID. See above. |
+| *Device unavailable* right after start | Known SDK bug ([#292](https://github.com/facebook/meta-wearables-dat-ios/issues/292)) on 0.9.0 + some firmware. Try `exactVersion: 0.8.0` in `project.yml`. |
+| *Internal error* during Meta registration | Known on iPhone 17e / iOS 26.5.1 ([#205](https://github.com/facebook/meta-wearables-dat-ios/issues/205)). |
+| Relay/OBS shows nothing | Stream key empty? Any non-empty key works for your own server. Check the server accepts Enhanced-RTMP HEVC (FFmpeg ≥ 6.1 does). |
+| Kick login page opens the Kick app instead | Universal-link quirk; long-press → open in browser, or retry. |
+| Twitch rejects the stream | Non-Affiliate accounts don't accept HEVC. Use Restream or a relay that transcodes. |
 
-## Alternative: build locally with xtool (WSL)
+## Security notes
 
-`xtool` (https://github.com/xtool-org/xtool) builds and signs SwiftPM
-projects from WSL without GitHub Actions, but it needs a ~5 GB `Xcode.xip`
-download from Apple first, its handling of the DAT SDK's binary
-xcframeworks is unproven, and it has an open `@Observable` macro bug on
-Linux — avoid that macro in this codebase if you plan to try it.
+- The `signing/` folder (certificate, profile, client-ID files, IPA password) is gitignored. Never commit it.
+- Build artifacts are encrypted because anyone with a GitHub account can download public-repo artifacts and the IPA
+  embeds OAuth client secrets. Development-signed IPAs only install on the UDIDs in the profile anyway.
+- Platform tokens and stream keys are stored in `UserDefaults` on the phone (single-user app). Move them to the
+  Keychain if you share the device.
+
+## Roadmap
+
+Chat read aloud into the glasses · local HEVC recording · SRT output · multi-destination from the phone ·
+H.264 transcode mode for Twitch non-affiliates.
+
+## Credits
+
+[Meta Wearables Device Access Toolkit](https://github.com/facebook/meta-wearables-dat-ios) ·
+[HaishinKit](https://github.com/HaishinKit/HaishinKit.swift) · [XcodeGen](https://github.com/yonaskolb/XcodeGen) ·
+[pymobiledevice3](https://github.com/doronz88/pymobiledevice3).
+Built by [Saeed Kolivand](https://iamsaeed.dev) with Claude Code.

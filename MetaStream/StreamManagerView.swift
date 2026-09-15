@@ -97,8 +97,12 @@ struct StreamManagerView: View {
                     case "restream": platforms.connectRestream()
                     default: platforms.connectYouTube()
                     }
-                } label: { Label("Connect \(name)", systemImage: "link").frame(maxWidth: .infinity) }
+                } label: {
+                    HStack { Spacer(); Image(systemName: "link"); Text("Connect \(name)").bold(); Spacer() }
+                }
                 .buttonStyle(.borderedProminent)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
             }
         } footer: {
             Text(tab == "youtube" ? "Create the live stream in YouTube Studio first; the app then finds it.\n" + platforms.status : platforms.status)
