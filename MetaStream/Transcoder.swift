@@ -11,11 +11,21 @@ final class Transcoder: @unchecked Sendable {
     private var failures = 0
     private var callbackFailures = 0
     private(set) var decoded = 0
+    private var synced = false        // HEVC decoding can only begin on a keyframe
+    private var skipped = 0
 
     init(sink: @escaping @Sendable (CMSampleBuffer) -> Void) { self.sink = sink }
 
     func decode(_ sb: CMSampleBuffer) {
         guard let fd = sb.formatDescription else { return }
+        // Frames arrive mid-GOP, so feeding the decoder before a keyframe returns -17694 on every one.
+        if !synced {
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[CFString: Any]]
+            let notSync = attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
+            guard !notSync else { skipped += 1; return }
+            synced = true
+            applog("stream", "keyframe found after \(skipped) skipped frames")
+        }
         if session == nil || format.map({ !CMFormatDescriptionEqual($0, otherFormatDescription: fd) }) ?? true {
             invalidate()
             var s: VTDecompressionSession?
@@ -69,5 +79,7 @@ final class Transcoder: @unchecked Sendable {
         if let s = session { VTDecompressionSessionInvalidate(s) }
         session = nil
         format = nil
+        synced = false        // after a teardown the decoder needs a fresh keyframe again
+        skipped = 0
     }
 }

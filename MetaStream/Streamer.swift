@@ -22,6 +22,7 @@ private final class Hot: @unchecked Sendable {
     var frames = 0
     var bytes = 0
     var transcoder: Transcoder?         // non-nil = decode HEVC → H.264 encoder instead of passthrough
+    var warm = false                    // decoder warming up before the RTMP connect
     var sent = 0                        // glasses frames handed to the RTMP path
     var appended = 0                    // decoded frames handed to the mixer
     var showMixerVideo = false          // preview shows mixer output (phone camera / black) instead of glasses frames
@@ -259,10 +260,10 @@ final class Streamer: ObservableObject {
                     let sb = frame.sampleBuffer
                     hot.frames += 1
                     hot.bytes += CMSampleBufferGetTotalSampleSize(sb)
-                    if hot.live && hot.forward {
+                    if hot.forward, hot.live || hot.warm {
                         hot.sent += 1
                         if let t = hot.transcoder { t.decode(sb) }            // H.264 mode: decode → mixer → encoder
-                        else { Task { await rtmp.append(sb) } }               // HEVC mode: passthrough, no encode
+                        else if hot.live { Task { await rtmp.append(sb) } }   // HEVC mode: passthrough, no encode
                     }
                     if !hot.showMixerVideo, let preview = hot.preview {       // AVSampleBufferDisplayLayer is thread-safe
                         if preview.status == .failed { preview.flush() }
@@ -458,6 +459,13 @@ final class Streamer: ObservableObject {
                     vm.mode = .passthrough                // track 0 straight through to the encoder
                     vm.mainTrack = 0
                     await mixer.setVideoMixerSettings(vm)
+                    // Decode before connecting: an ingest that finds no video in its first seconds of probing
+                    // treats the whole session as audio-only. Warm up, then connect with frames already flowing.
+                    hot.warm = true
+                    rtmpState = "waiting for keyframe…"
+                    var waited = 0
+                    while hot.transcoder?.decoded == 0, waited < 80 { try await Task.sleep(for: .milliseconds(100)); waited += 1 }
+                    applog("stream", "decoder warm after \(waited * 100) ms, decoded=\(hot.transcoder?.decoded ?? 0)")
                 }
                 try? await stream.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
 
@@ -506,6 +514,7 @@ final class Streamer: ObservableObject {
     func stopLive() {
         live = false
         liveSince = nil
+        hot.warm = false
         hot.transcoder?.invalidate()
         hot.transcoder = nil
         fallbackTask?.cancel()
