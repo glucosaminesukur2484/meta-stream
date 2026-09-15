@@ -1,0 +1,50 @@
+name: build-ipa
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Warn if TEAM_ID secret is empty
+        run: |
+          if [ -z "${{ secrets.TEAM_ID }}" ]; then
+            echo "::warning::TEAM_ID secret empty: bootstrap build, app will only show your Team ID"
+          fi
+
+      - name: Archive
+        run: |
+          xcodebuild archive \
+            -project MetaStream.xcodeproj \
+            -scheme MetaStream \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/MetaStream.xcarchive \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            META_APP_ID="${{ secrets.META_APP_ID }}" CLIENT_TOKEN="${{ secrets.CLIENT_TOKEN }}" TEAM_ID="${{ secrets.TEAM_ID }}"
+
+      - name: Package IPA
+        run: |
+          mkdir -p build/Payload && cp -R build/MetaStream.xcarchive/Products/Applications/MetaStream.app build/Payload/ && (cd build && zip -qry MetaStream.ipa Payload)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MetaStream-ipa
+          path: build/MetaStream.ipa
+          retention-days: 1
