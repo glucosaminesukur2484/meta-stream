@@ -11,6 +11,8 @@ final class PreviewUIView: UIView {
 
 struct PreviewView: UIViewRepresentable {
     @EnvironmentObject var streamer: Streamer
+    @EnvironmentObject var speaker: Speaker
+    @EnvironmentObject var chat: ChatFeed
     func makeUIView(context: Context) -> PreviewUIView {
         let view = PreviewUIView()
         view.displayLayer.videoGravity = .resizeAspect
@@ -124,8 +126,16 @@ struct ContentView: View {
                 .presentationBackground(.black)
         }
         .alert("Status", isPresented: $showStatus) { Button("OK") {} } message: {
-            Text("Meta: \(streamer.registration)\nGlasses: \(streamer.glassesState)\nDevices: \(streamer.devices)\nRTMP: \(streamer.rtmpState)\nFrames: \(streamer.frames)\nTeam ID: \(streamer.teamID)")
+            Text("Meta: \(streamer.registration)\nGlasses: \(streamer.glassesState)\nDevices: \(streamer.devices)\nRTMP: \(streamer.rtmpState)\nDrops: \(streamer.drops)\nFrames: \(streamer.frames)\nTeam ID: \(streamer.teamID)" + (streamer.sessionSummary.map { "\nLast: \($0)" } ?? ""))
         }
+        .task {
+            // ponytail: one consumer for the app's lifetime. ChatFeed buffers, Speaker bounds its own lanes,
+            // so nothing here needs backpressure handling.
+            for await e in chat.events { speaker.speak(e) }
+        }
+        .onAppear { startChat() }
+        .onChange(of: chatChannel) { _, _ in startChat() }
+        .onChange(of: chatSite) { _, _ in startChat() }
         .onAppear { UIApplication.shared.isIdleTimerDisabled = keepAwake }
         .onChange(of: keepAwake) { _, v in UIApplication.shared.isIdleTimerDisabled = v }
         .onChange(of: streamer.lastPhotoAt) { _, _ in
@@ -146,7 +156,12 @@ struct ContentView: View {
 
                 if streamer.live {
                     TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                        pill("record.circle.fill", elapsed(ctx.date), .red)
+                        // Amber while down: the timer measures the session, never the connection, so it
+                        // has to show degraded time rather than quietly counting dead air as healthy.
+                        let down = streamer.connectedSince == nil
+                        pill(down ? "exclamationmark.triangle.fill" : "record.circle.fill",
+                             down ? "down " + elapsed(ctx.date) : elapsed(ctx.date),
+                             down ? .orange : .red)
                     }
                     pill("waveform", "\(streamer.fps) fps · \(streamer.kbps) kbps", .white)
                 } else {
@@ -166,6 +181,11 @@ struct ContentView: View {
                     pill(streamer.cameraOff ? "video.slash.fill" : "video.fill", streamer.cameraOff ? "cam off" : "cam", streamer.cameraOff ? .orange : .white)
                 }
                 .buttonStyle(.plain)
+                Button { tap(); speaker.muted.toggle() } label: {
+                    // Silences chat and alerts only. Stream warnings speak regardless — see Speaker.
+                    pill(speaker.muted ? "speaker.slash.fill" : "speaker.wave.2.fill", speaker.muted ? "tts off" : "tts", speaker.muted ? .orange : .white)
+                }
+                .buttonStyle(.plain)
                 Button { tap(); showManager = true } label: {
                     pill("slider.horizontal.3", "manage", .cyan)
                 }
@@ -173,6 +193,12 @@ struct ContentView: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    /// ponytail: Kick only for now — it's the one chat that needs no token. Others arrive with their transports.
+    private func startChat() {
+        guard chatSite == "kick", !chatChannel.isEmpty else { chat.stop(); return }
+        chat.start(kickSlug: chatChannel)
     }
 
     /// auto → glasses → back → front → auto
