@@ -34,22 +34,40 @@ MetaStream fills that gap. I wrote it for my own streams and published it so oth
 
 | | |
 |---|---|
-| **Glasses video** | Official Meta *Wearables Device Access Toolkit*; compressed HEVC straight from the glasses, 720×1280 up to 30 fps |
-| **Keeps streaming in the background** | Check chat, answer a text or open Maps. The stream keeps going |
-| **Zero re-encoding** | HEVC is passed through to RTMP untouched, so the phone stays cool and the battery lasts |
-| **Phone-camera fallback** | When the glasses disconnect, the back or front camera takes over within 2 s with the same codec, so the stream doesn't restart. You can also switch manually |
-| **Chat** | Kick, Twitch, YouTube or Restream chat in a slide-up sheet over the preview |
-| **Stream Manager** | Log in to Kick / Twitch / Restream / YouTube inside the app: edit title & category, see viewers, send chat, pull your stream key automatically |
-| **Destinations** | Presets for Kick, Twitch, YouTube, Restream; Instagram, TikTok and any custom RTMP/RTMPS |
-| **Controls** | Go Live / End, mic mute, camera off (black frames), photo capture to Photos, quality, bitrate, mic picker, keep-awake, live HUD with fps / kbps / timer |
+| **Glasses video** | Meta's *Wearables Device Access Toolkit* hands the app the glasses' camera as compressed HEVC, 720×1280 at up to 30 fps |
+| **Streams in the background** | Check chat, answer a text or open Maps while the stream keeps running |
+| **Picture in Picture** | Leaving the app puts the feed in a floating window. That window is also what keeps a transcoded stream running once the app is no longer in front |
+| **Codec handling** | The glasses' HEVC goes out untouched where the destination accepts it. Where it doesn't, the phone decodes and re-encodes to H.264 |
+| **Phone-camera fallback** | When the glasses drop, the back or front camera takes over within 2 seconds and the stream does not restart. You can also switch by hand |
+| **Chat** | Kick, Twitch, YouTube or Restream chat in a sheet that slides over the preview |
+| **Stream Manager** | Sign in to Kick, Twitch, Restream and YouTube inside the app to edit the title and category, watch the viewer count, send chat, pull your stream key, and switch Restream destinations on and off |
+| **Destinations** | Presets for Kick, Twitch, YouTube and Restream, plus Instagram, TikTok and any RTMP or RTMPS server |
+| **Controls** | Go live and end, mic mute, camera off as black frames, photo capture to Photos, resolution, frame rate, bitrate, microphone picker, keep awake, and a heads-up display with fps, kbps and the stream timer |
+| **Logs** | Every API call, stream event and decoder error lands in Settings → Logs with a share button. Stream keys and tokens are masked before anything is written |
 
 ### Limits you should know
 
-- **720×1280 portrait @ 30 fps max.** That is the SDK's ceiling for every third-party app.
-- **Twitch accepts HEVC only from Affiliates/Partners.** Everyone else: stream to Restream (it re-encodes to H.264) or to your own relay.
-- **Paid Apple Developer team required** for the build. See [Why a paid Apple team](#why-a-paid-apple-team).
-- One third-party app can be registered with the glasses at a time; registering MetaStream unregisters e.g. StreamHand.
-- Glasses microphone is Bluetooth HFP (8 kHz). Default is the phone mic; pick any input in Settings.
+- **720×1280 portrait at 30 fps is the ceiling.** The SDK offers nothing higher to any third-party app.
+- **The glasses choose their own bitrate**, which measured 450 to 600 kbps at 720p30. The bitrate slider only affects video the phone encodes, meaning the fallback camera and transcoded output.
+- **Background streaming without the floating window works only for HEVC destinations.** Anything transcoded needs Picture in Picture open, because iOS stops the hardware decoder once the app leaves the screen.
+- **A paid Apple Developer team is required** to build. See [Why a paid Apple team](#why-a-paid-apple-team).
+- The glasses keep one third-party app registered at a time, so registering MetaStream unregisters StreamHand or whatever else you used.
+- The glasses microphone runs over Bluetooth HFP at 8 kHz. The phone mic is the default, and any input can be picked in Settings.
+
+## Which codec goes where
+
+Tested against each ingest, not taken from marketing pages:
+
+| Destination | Takes HEVC | What the app sends |
+|---|---|---|
+| Your own RTMP server | yes, if your server decodes it | HEVC, untouched |
+| YouTube | yes, over enhanced RTMP | HEVC, untouched |
+| Kick | no | H.264 from the phone |
+| Restream over RTMP | no, only over SRT | H.264 from the phone |
+| Twitch | Affiliates and Partners only | H.264 from the phone |
+| Instagram, TikTok | no | H.264 from the phone |
+
+Auto follows this table, and Settings lets you override it per stream. Two things come with transcoding. Going live takes a second or two longer, because the decoder waits for a keyframe before connecting, and the stream pauses in the background unless the Picture in Picture window is up.
 
 ## How it works
 
@@ -164,16 +182,16 @@ Bluetooth but never receives a frame. This is Apple's rule, and the app can't wo
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+| Symptom | Cause and fix |
 |---|---|
-| Glasses pill stuck on *connecting*, frames 0 | The build was signed with a free Apple ID and lacks the Wi-Fi entitlements. See above. |
-| *Device unavailable* right after start | Known SDK bug ([#292](https://github.com/facebook/meta-wearables-dat-ios/issues/292)) on 0.9.0 + some firmware. Try `exactVersion: 0.8.0` in `project.yml`. |
-| *Internal error* during Meta registration | Known on iPhone 17e / iOS 26.5.1 ([#205](https://github.com/facebook/meta-wearables-dat-ios/issues/205)). |
-| Relay/OBS shows nothing | Stream key empty? Any non-empty key works for your own server. Check the server accepts Enhanced-RTMP HEVC (FFmpeg ≥ 6.1 does). |
-| Kick login page opens the Kick app instead | A universal-link quirk. Long-press the link and open it in the browser, or retry. |
-| Twitch rejects the stream | Non-Affiliate accounts don't accept HEVC. Use Restream or a relay that transcodes. |
-| Ingest connects but shows offline, or OBS stays blank | The destination refused HEVC. Set the codec to H.264 in Settings (Auto already does this for Kick and Twitch). |
-| Stream freezes when you leave the app in H.264 mode | iOS stops the hardware decoder in the background. Keep the Picture in Picture window open, or send HEVC to Restream or your own relay instead. |
+| Glasses pill stuck on *connecting*, 0 frames | The build was signed with a free Apple ID and has no Wi-Fi entitlements. See above. |
+| *Device unavailable* right after starting the glasses | An SDK bug ([#292](https://github.com/facebook/meta-wearables-dat-ios/issues/292)). The app retries three times on its own and usually connects on the second. If all three fail, toggle Bluetooth or reopen the Meta AI app. |
+| *Internal error* during Meta registration | Reported on iPhone 17e with iOS 26.5.1 ([#205](https://github.com/facebook/meta-wearables-dat-ios/issues/205)). |
+| Ingest accepts the connection, then closes it a second later | The destination refused the codec. Set the codec to H.264 in Settings, or leave it on Auto. |
+| The channel stays offline although the app says live | Same cause. A server that finds no video while it probes the first seconds treats the session as audio only. |
+| Your own relay or OBS shows nothing | Check the stream key is not empty, and that the server decodes HEVC. FFmpeg 6.1 and newer does. |
+| The stream freezes when you leave the app | Only transcoded streams do this. Keep the Picture in Picture window open, or send HEVC to YouTube or your own relay. |
+| Kick login opens the Kick app instead of the login page | A universal-link quirk. Long-press the link and open it in the browser, or try again. |
 
 ## Security notes
 
@@ -185,8 +203,7 @@ Bluetooth but never receives a frame. This is Apple's rule, and the app can't wo
 
 ## Roadmap
 
-Chat read aloud through the glasses, local HEVC recording, SRT output, several destinations from the phone, and an
-H.264 mode for Twitch accounts without Affiliate status.
+Chat read aloud through the glasses, local HEVC recording, SRT output, and several destinations at once from the phone.
 
 ## Credits
 
