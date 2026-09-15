@@ -9,6 +9,8 @@ final class Transcoder: @unchecked Sendable {
     private var format: CMFormatDescription?
     private let sink: @Sendable (CMSampleBuffer) -> Void
     private var failures = 0
+    private var callbackFailures = 0
+    private(set) var decoded = 0
 
     init(sink: @escaping @Sendable (CMSampleBuffer) -> Void) { self.sink = sink }
 
@@ -32,8 +34,17 @@ final class Transcoder: @unchecked Sendable {
         guard let session else { return }
         let pts = sb.presentationTimeStamp
         let dur = sb.duration
-        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sb, flags: [], infoFlagsOut: nil) { [sink] status, _, image, ipts, _ in
-            guard status == noErr, let image else { return }
+        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sb, flags: [], infoFlagsOut: nil) { [weak self] status, _, image, ipts, _ in
+            guard let self else { return }
+            guard status == noErr, let image else {
+                self.callbackFailures += 1
+                if self.callbackFailures == 1 || self.callbackFailures % 100 == 0 {
+                    applog("stream", "HEVC decode callback empty: status=\(status) image=\(image != nil) (x\(self.callbackFailures))", error: true)
+                }
+                return
+            }
+            self.decoded += 1
+            if self.decoded == 1 { applog("stream", "first frame decoded \(CVPixelBufferGetWidth(image))x\(CVPixelBufferGetHeight(image))") }
             var fdOut: CMVideoFormatDescription?
             CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: image, formatDescriptionOut: &fdOut)
             guard let fdOut else { return }
@@ -41,7 +52,7 @@ final class Transcoder: @unchecked Sendable {
             var out: CMSampleBuffer?
             CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: image, formatDescription: fdOut,
                                                      sampleTiming: &timing, sampleBufferOut: &out)
-            if let out { sink(out) }
+            if let out { self.sink(out) } else { applog("stream", "decoded frame -> CMSampleBuffer failed", error: true) }
         }
         if status != noErr {
             failures += 1

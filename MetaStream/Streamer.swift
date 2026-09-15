@@ -22,6 +22,8 @@ private final class Hot: @unchecked Sendable {
     var frames = 0
     var bytes = 0
     var transcoder: Transcoder?         // non-nil = decode HEVC → H.264 encoder instead of passthrough
+    var sent = 0                        // glasses frames handed to the RTMP path
+    var appended = 0                    // decoded frames handed to the mixer
     var showMixerVideo = false          // preview shows mixer output (phone camera / black) instead of glasses frames
     weak var preview: AVSampleBufferDisplayLayer?
 }
@@ -130,7 +132,8 @@ final class Streamer: ObservableObject {
             }
         }
         evaluateSource()                                // glasses off at launch → phone camera after 2 s
-        Task { [weak self] in                           // 1 s stats tick for the HUD
+        Task { [weak self] in                           // 1 s stats tick for the HUD, logged every 5 s while live
+            var tick = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self else { return }
@@ -139,6 +142,11 @@ final class Streamer: ObservableObject {
                 self.kbps = (b - self.lastBytes) * 8 / 1000
                 self.frames = f
                 self.lastFrames = f; self.lastBytes = b
+                tick += 1
+                if self.live, tick % 5 == 0 {
+                    let mode = self.hot.transcoder == nil ? "hevc-passthrough" : "h264-transcode"
+                    applog("stream", "stats source=\(self.source) \(mode) glassesFps=\(self.fps) glassesKbps=\(self.kbps) sent=\(self.hot.sent) decoded=\(self.hot.transcoder?.decoded ?? 0) appended=\(self.hot.appended)")
+                }
             }
         }
     }
@@ -252,6 +260,7 @@ final class Streamer: ObservableObject {
                     hot.frames += 1
                     hot.bytes += CMSampleBufferGetTotalSampleSize(sb)
                     if hot.live && hot.forward {
+                        hot.sent += 1
                         if let t = hot.transcoder { t.decode(sb) }            // H.264 mode: decode → mixer → encoder
                         else { Task { await rtmp.append(sb) } }               // HEVC mode: passthrough, no encode
                     }
@@ -417,8 +426,8 @@ final class Streamer: ObservableObject {
         let h264 = codec == "h264"
         hot.transcoder?.invalidate()
         if h264 {
-            let mixer = self.mixer
-            hot.transcoder = Transcoder { sb in Task { await mixer.append(sb) } }
+            let mixer = self.mixer, hot = self.hot
+            hot.transcoder = Transcoder { sb in hot.appended += 1; Task { await mixer.append(sb) } }
         } else {
             hot.transcoder = nil
         }
@@ -443,7 +452,13 @@ final class Streamer: ObservableObject {
                     profileLevel: (h264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel) as String,
                     maxKeyFrameIntervalDuration: 2,
                     expectedFrameRate: 30))
-                if h264 { await wireMixer() }             // decoded frames need the mixer → encoder → stream path
+                if h264 {                                 // decoded frames need the mixer → encoder → stream path
+                    await wireMixer()
+                    var vm = await mixer.videoMixerSettings
+                    vm.mode = .passthrough                // track 0 straight through to the encoder
+                    vm.mainTrack = 0
+                    await mixer.setVideoMixerSettings(vm)
+                }
                 try? await stream.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
 
                 applog("stream", "connecting to \(url) key=\(key.count) chars, mic=\(micUID.isEmpty ? "default" : micUID), bitrate=\(bitrateKbps), codec=\(codec)")
