@@ -56,8 +56,9 @@ struct ContentView: View {
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
     @AppStorage("codec") var codecPref = "auto"
     @AppStorage("platform") var platformPref = "kick"
-    /// auto: Kick, Twitch and Restream refuse or gate HEVC; YouTube and custom relays take the untouched stream.
-    private var codec: String { codecPref == "auto" ? (["kick", "twitch", "restream"].contains(platformPref) ? "h264" : "hevc") : codecPref }
+    /// auto: only YouTube (enhanced RTMP) and custom servers take the glasses' HEVC untouched. Kick, Restream,
+    /// Instagram and TikTok are H.264-only ingests, and Twitch gates HEVC behind Affiliate, so they get a transcode.
+    private var codec: String { codecPref == "auto" ? (["youtube", "custom"].contains(platformPref) ? "hevc" : "h264") : codecPref }
 
     @State private var showSettings = false
     @State private var showChat = false

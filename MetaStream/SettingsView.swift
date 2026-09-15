@@ -26,13 +26,13 @@ struct SettingsView: View {
         "restream": "rtmp://live.restream.io/live",
     ]
     private static let hints: [String: String] = [
-        "kick": "Kick accepts up to 8000 kbps, H.264 only. H.264 needs the phone's decoder, which iOS stops in the background: for background streaming to Kick, go through Restream instead.",
-        "twitch": "Twitch: up to 6000 kbps (8000 for Partners). HEVC only for Affiliates/Partners.",
-        "youtube": "YouTube: up to ~9000 kbps at 1080p. Create the stream in YouTube Studio first.",
-        "restream": "Restream fans out to every destination you set up there. Send H.264: it ignored HEVC in testing.",
-        "instagram": "Instagram: open Live Producer on instagram.com (desktop), copy the stream URL + key here. ≤ 4000 kbps.",
-        "tiktok": "TikTok: get the server URL + key from TikTok LIVE Studio and paste both here.",
-        "custom": "Any RTMP/RTMPS server, e.g. your own relay.",
+        "kick": "H.264 only, up to 8000 kbps. Transcoding uses the phone's decoder, which iOS stops in the background unless the Picture in Picture window stays open.",
+        "twitch": "Up to 6000 kbps, 8000 for Partners. HEVC is Affiliate/Partner only, so Auto sends H.264.",
+        "youtube": "Takes the glasses' HEVC untouched over enhanced RTMP, so it also keeps streaming in the background. Create the stream in YouTube Studio first.",
+        "restream": "Fans out to every destination set up in the Restream dashboard. Their RTMP ingest is H.264 only (HEVC needs SRT), so Auto transcodes.",
+        "instagram": "Open Live Producer on instagram.com (desktop) and copy the stream URL and key here. H.264 only, up to 4000 kbps.",
+        "tiktok": "Get the server URL and key from TikTok LIVE Studio and paste both here. H.264 only.",
+        "custom": "Any RTMP/RTMPS server, such as your own relay. Auto sends HEVC untouched; switch to H.264 if your server refuses it.",
     ]
 
     var body: some View {
