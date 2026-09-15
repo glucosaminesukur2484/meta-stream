@@ -11,8 +11,6 @@ final class PreviewUIView: UIView {
 
 struct PreviewView: UIViewRepresentable {
     @EnvironmentObject var streamer: Streamer
-    @EnvironmentObject var speaker: Speaker
-    @EnvironmentObject var chat: ChatFeed
     func makeUIView(context: Context) -> PreviewUIView {
         let view = PreviewUIView()
         view.displayLayer.videoGravity = .resizeAspect
@@ -45,6 +43,8 @@ struct ChatView: UIViewRepresentable {
 
 struct ContentView: View {
     @EnvironmentObject var streamer: Streamer
+    @EnvironmentObject var speaker: Speaker
+    @EnvironmentObject var chat: ChatFeed
     @AppStorage("rtmpURL") var rtmpURL = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     // ponytail: stream key in UserDefaults; move to Keychain if the phone is shared.
     @AppStorage("streamKey") var streamKey = ""
