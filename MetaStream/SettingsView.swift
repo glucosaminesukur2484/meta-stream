@@ -16,6 +16,13 @@ struct SettingsView: View {
     @AppStorage("keepAwake") var keepAwake = true
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
     @AppStorage("codec") var codec = "auto"
+    @AppStorage("ttsMessagesOn") var ttsMessagesOn = true
+    @AppStorage("ttsTipsOn") var ttsTipsOn = true
+    @AppStorage("ttsFollowsOn") var ttsFollowsOn = true
+    @AppStorage("ttsSubsOn") var ttsSubsOn = true
+    @AppStorage("ttsRaidsOn") var ttsRaidsOn = true
+    @AppStorage("ttsRate") var ttsRate = 0.5
+    @AppStorage("ttsMinTipCents") var ttsMinTipCents = 0
     @State private var showKey = false
 
     // Ingest URLs. Instagram and TikTok hand out a per-stream URL in their own tools, so they stay "custom".
@@ -94,6 +101,21 @@ struct SettingsView: View {
                 Section {
                     Picker("Fallback camera", selection: $fallbackCamera) { Text("Back").tag("back"); Text("Front").tag("front") }
                         .pickerStyle(.segmented)
+                Section {
+                    Toggle("Chat messages", isOn: $ttsMessagesOn)
+                    Toggle("Tips and bits", isOn: $ttsTipsOn)
+                    Toggle("Follows", isOn: $ttsFollowsOn)
+                    Toggle("Subscriptions", isOn: $ttsSubsOn)
+                    Toggle("Raids", isOn: $ttsRaidsOn)
+                    VStack(alignment: .leading) {
+                        Text("Speed").font(.footnote).foregroundStyle(.secondary)
+                        Slider(value: $ttsRate, in: 0.35...0.65)
+                    }
+                    Stepper("Read tips from $\(ttsMinTipCents / 100)", value: $ttsMinTipCents, in: 0...5000, step: 100)
+                } header: { Text("Read aloud") } footer: {
+                    Text("Chat is spoken through whatever is playing audio, so the glasses' open-ear speakers when they are connected. The tts pill on the live screen silences chat and alerts; stream warnings such as a dropped connection always speak.\n\nWith the glasses microphone selected, the open-ear speakers can bleed back into your audio. Use the phone microphone if viewers hear an echo.")
+                }
+
                 } header: { Text("Fallback camera") } footer: {
                     Text("Used automatically while the glasses are disconnected, so the stream never goes black.")
                 }
