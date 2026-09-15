@@ -59,6 +59,7 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Meta: \(streamer.registration)   Glasses: \(streamer.glassesState)")
+                Text("Devices: \(streamer.devices)")
                 Text("RTMP: \(streamer.rtmpState)   frames: \(streamer.frames)")
                 Text("Apple Team ID: \(streamer.teamID)")
             }

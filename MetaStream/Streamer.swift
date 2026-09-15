@@ -28,11 +28,20 @@ final class Streamer: ObservableObject {
     private lazy var stream = RTMPStream(connection: connection)
     private let mixer = MediaMixer()
 
+    @Published var devices = "none seen yet"
+
     init() {
         teamID = Self.readTeamID()
         Task { [weak self] in
             for await state in Wearables.shared.registrationStateStream() {
                 self?.registration = state.description
+            }
+        }
+        Task { [weak self] in
+            for await ids in Wearables.shared.devicesStream() {
+                let list = ids.compactMap { Wearables.shared.deviceForIdentifier($0) }
+                    .map { "\($0.nameOrId()) \($0.linkState) \($0.compatibility())" }
+                self?.devices = list.isEmpty ? "none" : list.joined(separator: ", ")
             }
         }
     }
@@ -49,7 +58,29 @@ final class Streamer: ObservableObject {
                 // ponytail: not branching on the returned status; createSession fails anyway if denied.
                 _ = try await Wearables.shared.requestPermission(.camera)
 
-                let session = try Wearables.shared.createSession(deviceSelector: AutoDeviceSelector(wearables: Wearables.shared))
+                // The SDK fills its device list asynchronously after registration; give it up to 10 s.
+                let selector = AutoDeviceSelector(wearables: Wearables.shared)
+                glassesState = "looking for glasses…"
+                var tries = 0
+                while selector.activeDevice == nil, tries < 20 {   // ponytail: 0.5 s poll instead of racing activeDeviceStream
+                    try await Task.sleep(for: .milliseconds(500)); tries += 1
+                }
+                guard let id = selector.activeDevice, let device = Wearables.shared.deviceForIdentifier(id) else {
+                    glassesState = "no linked glasses. Open Meta AI, make sure glasses are connected, then retry"
+                    return
+                }
+                switch device.compatibility() {
+                case .deviceUpdateRequired:
+                    glassesState = "glasses firmware too old, opening Meta AI update"
+                    try await Wearables.shared.openFirmwareUpdate()
+                    return
+                case .sdkUpdateRequired:
+                    glassesState = "app SDK too old for these glasses, rebuild with newer DAT"
+                    return
+                default: break
+                }
+
+                let session = try Wearables.shared.createSession(deviceSelector: selector)
                 self.session = session
 
                 // hvc1 = compressed HEVC, keeps delivering while the app is in the background. .high = 720x1280.
@@ -80,9 +111,18 @@ final class Streamer: ObservableObject {
                     }
                 })
 
+                tokens.append(session.errorPublisher.listen { [weak self] error in
+                    Task { @MainActor in
+                        self?.glassesState = "session: \(error.description)"
+                        if error == .datAppOnTheGlassesUpdateRequired { try? await Wearables.shared.openDATGlassesAppUpdate() }
+                    }
+                })
                 try session.start()
                 camera.stream.start()
                 glassesState = "starting"
+            } catch DeviceSessionError.datAppOnTheGlassesUpdateRequired {
+                glassesState = "glasses need the Meta app update, opening Meta AI"
+                try? await Wearables.shared.openDATGlassesAppUpdate()
             } catch {
                 glassesState = error.localizedDescription
             }
