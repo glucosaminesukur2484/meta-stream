@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p build/Payload && cp -R build/MetaStream.xcarchive/Products/Applications/MetaStream.app build/Payload/ && (cd build && zip -qry MetaStream.ipa Payload)
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: MetaStream-ipa
           path: build/MetaStream.ipa
