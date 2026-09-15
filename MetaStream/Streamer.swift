@@ -32,7 +32,7 @@ final class Streamer: ObservableObject {
         teamID = Self.readTeamID()
         Task { [weak self] in
             for await state in Wearables.shared.registrationStateStream() {
-                self?.registration = String(describing: state)
+                self?.registration = state.description
             }
         }
     }
