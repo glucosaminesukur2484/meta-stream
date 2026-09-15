@@ -22,7 +22,16 @@ private let loggers: [String: Logger] = ["api", "stream", "glasses", "auth", "ui
     $0[$1] = Logger(subsystem: "com.saeedkolivand.metastream", category: $1)
 }
 
-/// `applog("api", "GET …")` from any thread. Never pass tokens, keys or secrets.
+/// Masks values of JSON/query fields that look like credentials before they reach the log or the console.
+/// Covers stream keys (Kick `key`, Twitch `stream_key`, Restream `streamKey`, YouTube `streamName`) and OAuth material.
+private let secretField = try! NSRegularExpression(
+    pattern: #"("(?:[a-zA-Z_]*(?:key|token|secret|password|authorization|streamName)[a-zA-Z_]*)"\s*:\s*")([^"]*)(")"#,
+    options: [.caseInsensitive])
+func redact(_ s: String) -> String {
+    secretField.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "$1***$3")
+}
+
+/// `applog("api", "GET …")` from any thread. Bodies must go through `redact` first; never pass raw tokens or keys.
 func applog(_ category: String, _ message: String, error: Bool = false) {
     let l = loggers[category] ?? loggers["ui"]!
     if error { l.error("\(message, privacy: .public)") } else { l.info("\(message, privacy: .public)") }

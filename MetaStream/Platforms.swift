@@ -440,7 +440,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        applog("api", "\(method) \(c.url!.absoluteString) -> \(code) \(String(decoding: data.prefix(700), as: UTF8.self))", error: code >= 400)
+        applog("api", "\(method) \(c.url!.absoluteString) -> \(code) \(redact(String(decoding: data.prefix(700), as: UTF8.self)))", error: code >= 400)
         if code == 401, !retried {
             try await refresh()
             return try await callAny(method, url, query: query, body: body, tokenKey: tokenKey, headers: headers, refresh: refresh, retried: true)
@@ -467,7 +467,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         req.httpBody = c.percentEncodedQuery?.data(using: .utf8)
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        applog("auth", "POST \(url) [\(fields.keys.sorted().joined(separator: ","))] -> \(code) \(code < 300 ? "ok" : String(decoding: data.prefix(400), as: UTF8.self))", error: code >= 400)
+        applog("auth", "POST \(url) [\(fields.keys.sorted().joined(separator: ","))] -> \(code) \(code < 300 ? "ok" : redact(String(decoding: data.prefix(400), as: UTF8.self)))", error: code >= 400)
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         guard allowError || (200..<300).contains(code) else { throw err("HTTP \(code): \(String(data: data, encoding: .utf8) ?? "")") }
         return json
