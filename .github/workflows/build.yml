@@ -72,8 +72,15 @@ jobs:
           codesign -d --entitlements - build/MetaStream.xcarchive/Products/Applications/MetaStream.app
           mkdir -p build/Payload && cp -R build/MetaStream.xcarchive/Products/Applications/MetaStream.app build/Payload/ && (cd build && zip -qry MetaStream.ipa Payload)
 
+      # Public repo: anyone with a GitHub account can download artifacts, and the IPA embeds OAuth client
+      # secrets. Encrypt it; decrypt locally with signing/ipa-password.txt (see README).
+      - name: Encrypt IPA
+        env:
+          IPA_PASSWORD: ${{ secrets.IPA_PASSWORD }}
+        run: openssl enc -aes-256-cbc -pbkdf2 -salt -in build/MetaStream.ipa -out build/MetaStream.ipa.enc -pass env:IPA_PASSWORD
+
       - uses: actions/upload-artifact@v7
         with:
           name: MetaStream-ipa
-          path: build/MetaStream.ipa
+          path: build/MetaStream.ipa.enc
           retention-days: 1
