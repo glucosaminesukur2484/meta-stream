@@ -5,8 +5,8 @@
 <h1 align="center">MetaStream</h1>
 
 <p align="center">
-  IRL streaming from <b>Ray-Ban Meta</b> glasses to Kick, Twitch, YouTube, Restream or any RTMP server —<br>
-  with chat, a stream manager, and a phone-camera fallback. Built and signed from <b>Windows</b>, no Mac needed.
+  IRL streaming from <b>Ray-Ban Meta</b> glasses to Kick, Twitch, YouTube, Restream or any RTMP server,<br>
+  with chat, a stream manager and a phone-camera fallback. Built and signed from <b>Windows</b>. No Mac needed.
 </p>
 
 <p align="center">
@@ -26,18 +26,18 @@
 
 ## Why this exists
 
-The apps that can talk to Meta glasses (StreamHand, MetaLens…) can't show chat, drop the glasses the moment you
-switch apps, and can't manage your broadcast. The apps that do all that (Streamlabs…) can't see the glasses.
-MetaStream is the missing middle, written for one streamer's own use and published so others can build their own copy.
+The apps that can talk to Meta glasses (StreamHand, MetaLens) don't show chat, drop the glasses the moment you
+switch apps, and can't manage your broadcast. The apps that do all that (Streamlabs) can't see the glasses.
+MetaStream fills that gap. I wrote it for my own streams and published it so others can build their own copy.
 
 ## What it does
 
 | | |
 |---|---|
 | **Glasses video** | Official Meta *Wearables Device Access Toolkit*; compressed HEVC straight from the glasses, 720×1280 up to 30 fps |
-| **Keeps streaming in the background** | Check chat, answer a text, open Maps — the stream never stops |
+| **Keeps streaming in the background** | Check chat, answer a text or open Maps. The stream keeps going |
 | **Zero re-encoding** | HEVC is passed through to RTMP untouched, so the phone stays cool and the battery lasts |
-| **Phone-camera fallback** | Glasses disconnect → back or front camera takes over within 2 s, same codec, no stream restart. Switch manually any time |
+| **Phone-camera fallback** | When the glasses disconnect, the back or front camera takes over within 2 s with the same codec, so the stream doesn't restart. You can also switch manually |
 | **Chat** | Kick, Twitch, YouTube or Restream chat in a slide-up sheet over the preview |
 | **Stream Manager** | Log in to Kick / Twitch / Restream / YouTube inside the app: edit title & category, see viewers, send chat, pull your stream key automatically |
 | **Destinations** | Presets for Kick, Twitch, YouTube, Restream; Instagram, TikTok and any custom RTMP/RTMPS |
@@ -47,7 +47,7 @@ MetaStream is the missing middle, written for one streamer's own use and publish
 
 - **720×1280 portrait @ 30 fps max.** That is the SDK's ceiling for every third-party app.
 - **Twitch accepts HEVC only from Affiliates/Partners.** Everyone else: stream to Restream (it re-encodes to H.264) or to your own relay.
-- **Paid Apple Developer team required** for the build — see [Why a paid Apple team](#why-a-paid-apple-team).
+- **Paid Apple Developer team required** for the build. See [Why a paid Apple team](#why-a-paid-apple-team).
 - One third-party app can be registered with the glasses at a time; registering MetaStream unregisters e.g. StreamHand.
 - Glasses microphone is Bluetooth HFP (8 kHz). Default is the phone mic; pick any input in Settings.
 
@@ -67,7 +67,7 @@ flowchart LR
 ```
 
 Everything is one SwiftUI app: `Streamer.swift` (glasses + RTMP + fallback), `Platforms.swift` (logins and APIs),
-`ContentView.swift` / `SettingsView.swift` / `StreamManagerView.swift` (UI). No server, no backend: platform tokens
+`ContentView.swift` / `SettingsView.swift` / `StreamManagerView.swift` (UI). There is no server. Platform tokens
 stay on the phone.
 
 ---
@@ -76,7 +76,7 @@ stay on the phone.
 
 You need: a pair of Ray-Ban Meta (Gen 1/2, Display, Oakley Meta), an iPhone on iOS 17.2+, the Meta AI app, a
 GitHub account, and access to a **paid Apple Developer team** (yours, or a friend who exports a development
-certificate for you). No Mac is required at any point — GitHub's macOS runners do the compiling.
+certificate for you). No Mac is required at any point. GitHub's macOS runners do the compiling.
 
 ### 1. Fork and rename
 
@@ -111,7 +111,7 @@ In <https://developer.apple.com/account> → Certificates, Identifiers & Profile
 
 ### 5. Redirect page
 
-Kick and Restream require an `https` redirect. `docs/oauth.html` is a static page that bounces the browser back
+Kick and Restream require an `https` redirect. `docs/oauth.html` is a static page that sends the browser back
 into the app. Serve it with GitHub Pages (*Settings → Pages → Deploy from branch → `main` `/docs`*), optionally
 behind a custom domain (add a `CNAME` record → `<you>.github.io`, **DNS only**).
 
@@ -157,20 +157,20 @@ for a year; rebuilds install over the previous version and keep your settings.
 
 ## Why a paid Apple team
 
-Since DAT SDK 0.8 the glasses send video over a direct Wi-Fi link, and joining it needs two entitlements —
-`com.apple.developer.networking.HotspotConfiguration` and `com.apple.developer.networking.wifi-info` — that Apple only
-grants to paid teams. A free Apple ID (Sideloadly, AltStore…) produces a build that registers and connects over
-Bluetooth but never receives a frame. This is a platform rule, not something the app can work around.
+Since DAT SDK 0.8 the glasses send video over a direct Wi-Fi link. Joining it needs two entitlements,
+`com.apple.developer.networking.HotspotConfiguration` and `com.apple.developer.networking.wifi-info`, which Apple only
+grants to paid teams. A build signed with a free Apple ID (Sideloadly, AltStore) registers and connects over
+Bluetooth but never receives a frame. This is Apple's rule, and the app can't work around it.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| Glasses pill stuck on *connecting*, frames 0 | Missing Wi-Fi entitlements → build signed with a free Apple ID. See above. |
+| Glasses pill stuck on *connecting*, frames 0 | The build was signed with a free Apple ID and lacks the Wi-Fi entitlements. See above. |
 | *Device unavailable* right after start | Known SDK bug ([#292](https://github.com/facebook/meta-wearables-dat-ios/issues/292)) on 0.9.0 + some firmware. Try `exactVersion: 0.8.0` in `project.yml`. |
 | *Internal error* during Meta registration | Known on iPhone 17e / iOS 26.5.1 ([#205](https://github.com/facebook/meta-wearables-dat-ios/issues/205)). |
 | Relay/OBS shows nothing | Stream key empty? Any non-empty key works for your own server. Check the server accepts Enhanced-RTMP HEVC (FFmpeg ≥ 6.1 does). |
-| Kick login page opens the Kick app instead | Universal-link quirk; long-press → open in browser, or retry. |
+| Kick login page opens the Kick app instead | A universal-link quirk. Long-press the link and open it in the browser, or retry. |
 | Twitch rejects the stream | Non-Affiliate accounts don't accept HEVC. Use Restream or a relay that transcodes. |
 
 ## Security notes
@@ -183,8 +183,8 @@ Bluetooth but never receives a frame. This is a platform rule, not something the
 
 ## Roadmap
 
-Chat read aloud into the glasses · local HEVC recording · SRT output · multi-destination from the phone ·
-H.264 transcode mode for Twitch non-affiliates.
+Chat read aloud through the glasses, local HEVC recording, SRT output, several destinations from the phone, and an
+H.264 mode for Twitch accounts without Affiliate status.
 
 ## Credits
 
