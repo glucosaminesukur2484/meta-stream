@@ -61,6 +61,7 @@ final class Streamer: ObservableObject {
     }
 
     private let hot = Hot()
+    var pip: PiPController?                        // owned here so it outlives SwiftUI view rebuilds
     private var lastFrames = 0
     private var lastBytes = 0
 
