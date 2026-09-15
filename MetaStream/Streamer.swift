@@ -28,7 +28,9 @@ final class Streamer: ObservableObject {
     @Published var manualSource = "auto"       // "auto" | "glasses" | "back" | "front" (user's choice)
     @Published var mics: [Mic] = []
     @Published var muted = false
+    @Published var cameraOff = false           // privacy: black frames go out instead of any camera
     @Published var lastPhotoAt: Date?
+    private var blackTask: Task<Void, Never>?
 
     /// Short glasses state for the HUD: "streaming" | "connecting" | "off".
     var glassesShort: String {
@@ -183,7 +185,7 @@ final class Streamer: ObservableObject {
                         self.frames += 1
                         self.tickFrames += 1
                         self.tickBytes += CMSampleBufferGetTotalSampleSize(frame.sampleBuffer)
-                        if self.live && self.source == "glasses" {
+                        if self.live && self.source == "glasses" && !self.cameraOff {
                             Task { await self.stream.append(frame.sampleBuffer) }   // compressed → passthrough, no encode
                         }
                         if let preview = self.preview {
@@ -289,6 +291,41 @@ final class Streamer: ObservableObject {
         mics = (s.availableInputs ?? []).map { Mic(id: $0.uid, name: $0.portName) }
     }
 
+    /// Camera off = detach any phone camera, stop forwarding glasses frames, and push black frames at 15 fps
+    /// so the platform keeps a live video track instead of freezing on the last picture.
+    func setCameraOff(_ off: Bool) {
+        cameraOff = off
+        blackTask?.cancel(); blackTask = nil
+        guard off else { evaluateSource(); return }
+        Task { try? await mixer.attachVideo(nil) }
+        blackTask = Task { [weak self] in
+            guard let pb = Self.blackPixelBuffer() else { return }
+            var fd: CMVideoFormatDescription?
+            CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: pb, formatDescriptionOut: &fd)
+            guard let fd else { return }
+            while !Task.isCancelled, let self, self.live, self.cameraOff {
+                var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 15),
+                                                presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                                                decodeTimeStamp: .invalid)
+                var sb: CMSampleBuffer?
+                CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: pb, formatDescription: fd, sampleTiming: &timing, sampleBufferOut: &sb)
+                if let sb { await self.mixer.append(sb) }        // goes through HaishinKit's encoder like the phone camera
+                try? await Task.sleep(for: .milliseconds(66))
+            }
+        }
+    }
+
+    private static func blackPixelBuffer() -> CVPixelBuffer? {
+        var pb: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 720, 1280, kCVPixelFormatType_32BGRA,
+                            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pb)
+        guard let pb else { return nil }
+        CVPixelBufferLockBaseAddress(pb, [])
+        memset(CVPixelBufferGetBaseAddress(pb), 0, CVPixelBufferGetDataSize(pb))
+        CVPixelBufferUnlockBaseAddress(pb, [])
+        return pb
+    }
+
     func setMuted(_ on: Bool) {
         muted = on
         Task {   // ponytail: mute = detach the mic; AudioMixerSettings per-track flags avoided
@@ -298,7 +335,8 @@ final class Streamer: ObservableObject {
 
     // MARK: RTMP
 
-    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position) {
+    /// bitrateKbps applies to what HaishinKit encodes (phone camera, black frames); the glasses set their own HEVC bitrate.
+    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position, bitrateKbps: Int = 4000) {
         self.fallbackPosition = fallbackPosition
         Task {
             do {
@@ -318,7 +356,7 @@ final class Streamer: ObservableObject {
                 // and makes the fallback-camera encoder produce HEVC too.
                 try? await stream.setVideoSettings(VideoCodecSettings(
                     videoSize: CGSize(width: 720, height: 1280),
-                    bitRate: 4_000_000,
+                    bitRate: bitrateKbps * 1000,
                     profileLevel: kVTProfileLevel_HEVC_Main_AutoLevel as String,
                     expectedFrameRate: 30))
                 try? await stream.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
@@ -353,6 +391,7 @@ final class Streamer: ObservableObject {
         live = false
         liveSince = nil
         fallbackTask?.cancel()
+        blackTask?.cancel(); blackTask = nil
         rtmpState = "stopped"
         Task {
             try? await mixer.attachVideo(nil)

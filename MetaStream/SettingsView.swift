@@ -14,21 +14,38 @@ struct SettingsView: View {
     @AppStorage("micUID") var micUID = ""
     @AppStorage("fallbackCamera") var fallbackCamera = "back"
     @AppStorage("keepAwake") var keepAwake = true
+    @AppStorage("bitrateKbps") var bitrateKbps = 4000
     @State private var showKey = false
 
-    private static let presets = [
+    // Ingest URLs. Instagram and TikTok hand out a per-stream URL in their own tools, so they stay "custom".
+    private static let presets: [String: String] = [
         "kick": "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/",
         "twitch": "rtmps://live.twitch.tv:443/app/",
+        "youtube": "rtmps://a.rtmps.youtube.com:443/live2",
+        "restream": "rtmps://live.restream.io:443/live",
+    ]
+    private static let hints: [String: String] = [
+        "kick": "Kick accepts up to 8000 kbps.",
+        "twitch": "Twitch: up to 6000 kbps (8000 for Partners). HEVC only for Affiliates/Partners.",
+        "youtube": "YouTube: up to ~9000 kbps at 1080p. Create the stream in YouTube Studio first.",
+        "restream": "Restream re-encodes to H.264 for every destination, so Twitch works even without Affiliate.",
+        "instagram": "Instagram: open Live Producer on instagram.com (desktop), copy the stream URL + key here. ≤ 4000 kbps.",
+        "tiktok": "TikTok: get the server URL + key from TikTok LIVE Studio and paste both here.",
+        "custom": "Any RTMP/RTMPS server, e.g. your own relay.",
     ]
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Destination") {
+                Section {
                     Picker("Platform", selection: $platform) {
-                        Text("Kick").tag("kick"); Text("Twitch").tag("twitch"); Text("Custom").tag("custom")
+                        Text("Kick").tag("kick"); Text("Twitch").tag("twitch"); Text("YouTube").tag("youtube")
+                        Text("Restream").tag("restream"); Text("Instagram").tag("instagram"); Text("TikTok").tag("tiktok")
+                        Text("Custom").tag("custom")
                     }
-                    .onChange(of: platform) { _, p in if let url = Self.presets[p] { rtmpURL = url } }
+                    .onChange(of: platform) { _, p in
+                        if let url = Self.presets[p] { rtmpURL = url } else if p != "custom" { rtmpURL = "" }
+                    }
                     TextField("RTMP URL", text: $rtmpURL)
                         .font(.footnote.monospaced())
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
@@ -41,6 +58,13 @@ struct SettingsView: View {
                         Button { showKey.toggle() } label: { Image(systemName: showKey ? "eye.slash" : "eye") }
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                     }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack { Text("Bitrate"); Spacer(); Text("\(bitrateKbps) kbps").monospacedDigit().foregroundStyle(.secondary) }
+                        Slider(value: Binding(get: { Double(bitrateKbps) }, set: { bitrateKbps = Int($0 / 250) * 250 }),
+                               in: 1000...9000, step: 250)
+                    }
+                } header: { Text("Destination") } footer: {
+                    Text((Self.hints[platform] ?? "") + "\nBitrate applies to phone-camera and camera-off video; the glasses choose their own HEVC bitrate.")
                 }
 
                 Section("Chat") {

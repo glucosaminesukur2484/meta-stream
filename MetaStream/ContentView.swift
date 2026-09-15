@@ -52,6 +52,7 @@ struct ContentView: View {
     @AppStorage("micUID") var micUID = ""
     @AppStorage("fallbackCamera") var fallbackCamera = "back"
     @AppStorage("keepAwake") var keepAwake = true
+    @AppStorage("bitrateKbps") var bitrateKbps = 4000
 
     @State private var showSettings = false
     @State private var showChat = false
@@ -70,7 +71,14 @@ struct ContentView: View {
             Color.black.ignoresSafeArea()
             PreviewView().ignoresSafeArea()
 
-            if streamer.source == "phone" {
+            if streamer.cameraOff {
+                VStack(spacing: 8) {
+                    Image(systemName: "video.slash.fill").font(.system(size: 44))
+                    Text("Camera off").font(.headline)
+                    Text("viewers see black").font(.caption).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.white)
+            } else if streamer.source == "phone" {
                 VStack(spacing: 8) {
                     Image(systemName: "iphone.rear.camera").font(.system(size: 44))
                     Text("Phone camera").font(.headline)
@@ -139,7 +147,14 @@ struct ContentView: View {
                          streamer.source == "phone" ? .orange : .white)
                 }
                 .buttonStyle(.plain)
-                if streamer.muted { pill("mic.slash.fill", "muted", .orange) }
+                Button { tap(); streamer.setMuted(!streamer.muted) } label: {
+                    pill(streamer.muted ? "mic.slash.fill" : "mic.fill", streamer.muted ? "muted" : "mic", streamer.muted ? .orange : .white)
+                }
+                .buttonStyle(.plain)
+                Button { tap(); streamer.setCameraOff(!streamer.cameraOff) } label: {
+                    pill(streamer.cameraOff ? "video.slash.fill" : "video.fill", streamer.cameraOff ? "cam off" : "cam", streamer.cameraOff ? .orange : .white)
+                }
+                .buttonStyle(.plain)
                 Button { tap(); showManager = true } label: {
                     pill("slider.horizontal.3", "manage", .cyan)
                 }
@@ -199,7 +214,8 @@ struct ContentView: View {
                     streamer.stopLive()
                 } else {
                     streamer.goLive(url: rtmpURL, key: streamKey, micUID: micUID,
-                                    fallbackPosition: fallbackCamera == "front" ? .front : .back)
+                                    fallbackPosition: fallbackCamera == "front" ? .front : .back,
+                                    bitrateKbps: bitrateKbps)
                 }
             } label: {
                 ZStack {
