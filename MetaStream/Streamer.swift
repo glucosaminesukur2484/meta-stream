@@ -114,7 +114,11 @@ final class Streamer: ObservableObject {
     init() {
         teamID = Self.readTeamID()
         applog("ui", "launch team=\(teamID)")
-        refreshMics()
+        // Active playback session from launch: iOS only auto-starts PiP for an app that is "playing".
+        // Playback (not record) so the orange mic indicator stays off until Go Live.
+        let s = AVAudioSession.sharedInstance()
+        try? s.setCategory(.playback, mode: .moviePlayback, options: [])
+        try? s.setActive(true)
         Task { [weak self] in
             for await state in Wearables.shared.registrationStateStream() {
                 self?.registration = state.description
@@ -123,11 +127,6 @@ final class Streamer: ObservableObject {
         Task { [weak self] in
             for await ids in Wearables.shared.devicesStream() {
                 self?.watchDevices(ids)
-            }
-        }
-        Task { [weak self] in
-            for await _ in NotificationCenter.default.notifications(named: AVAudioSession.routeChangeNotification) {
-                self?.refreshMics()
             }
         }
         evaluateSource()                                // glasses off at launch → phone camera after 2 s
@@ -340,14 +339,15 @@ final class Streamer: ObservableObject {
 
     // MARK: audio inputs
 
+    /// Lists inputs for the Settings picker. Called on demand (Settings opens, Go Live), never from route-change
+    /// notifications: switching category fires those and looped forever.
     func refreshMics() {
         let s = AVAudioSession.sharedInstance()
-        // allowBluetoothHFP is what makes the glasses show up as an input. Set the category once: setting it on
-        // every route change re-fires routeChangeNotification, which is an infinite refresh loop.
-        if s.category != .playAndRecord {
-            try? s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
-        }
+        let wasPlayback = s.category == .playback
+        // allowBluetoothHFP is what makes the glasses show up as an input; inputs are only listed under a record category.
+        try? s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
         let list = (s.availableInputs ?? []).map { Mic(id: $0.uid, name: $0.portName) }
+        if wasPlayback && !live { try? s.setCategory(.playback, mode: .moviePlayback, options: []) }
         guard list != mics else { return }
         mics = list
         applog("stream", "mics: \(mics.map(\.name))")
@@ -491,7 +491,7 @@ final class Streamer: ObservableObject {
             try? await connection.close()
         }
         source = "glasses"
-        try? AVAudioSession.sharedInstance().setActive(false)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [])   // mic off, PiP stays armed
     }
 
     // MARK: devices status line
