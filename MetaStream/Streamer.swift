@@ -76,8 +76,6 @@ final class Streamer: ObservableObject {
 
     init() {
         teamID = Self.readTeamID()
-        LBLogger.with(kHaishinKitIdentifier).level = .info
-        LBLogger.with(kRTMPHaishinKitIdentifier).level = .info
         applog("ui", "launch team=\(teamID)")
         refreshMics()
         Task { [weak self] in
