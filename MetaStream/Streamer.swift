@@ -152,7 +152,7 @@ final class Streamer: ObservableObject {
     }
 
     // Same order as Meta's CameraAccess sample: session.start() → wait for .started → addCamera → stream.start().
-    func startGlasses(resolution: String = "high", fps: UInt = 30) {
+    func startGlasses(resolution: String = "high", fps: UInt = 30, attempt: Int = 1) {
         glassesOn = true
         Task {
             do {
@@ -200,7 +200,17 @@ final class Streamer: ObservableObject {
                 // Wait until the device link is up; addCamera returns nil before that.
                 tries = 0
                 while session.state != .started, tries < 60 {           // ponytail: 30 s ceiling
-                    if session.state == .stopped { glassesOn = false; return }   // error listener already reported why
+                    if session.state == .stopped {                        // "Device unavailable" (SDK #292) usually clears on retry
+                        self.session = nil; tokens.removeAll()
+                        if attempt < 3 {
+                            glassesState = "glasses refused, retrying (\(attempt + 1)/3)…"
+                            try await Task.sleep(for: .seconds(2))
+                            startGlasses(resolution: resolution, fps: fps, attempt: attempt + 1)
+                        } else {
+                            glassesOn = false
+                        }
+                        return
+                    }
                     try await Task.sleep(for: .milliseconds(500)); tries += 1
                 }
                 guard session.state == .started else {
