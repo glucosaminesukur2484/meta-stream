@@ -29,7 +29,7 @@ struct SettingsView: View {
         "kick": "Kick accepts up to 8000 kbps, H.264 only. H.264 needs the phone's decoder, which iOS stops in the background: for background streaming to Kick, go through Restream instead.",
         "twitch": "Twitch: up to 6000 kbps (8000 for Partners). HEVC only for Affiliates/Partners.",
         "youtube": "YouTube: up to ~9000 kbps at 1080p. Create the stream in YouTube Studio first.",
-        "restream": "Restream re-encodes to H.264 for every destination, so Twitch works even without Affiliate.",
+        "restream": "Restream fans out to every destination you set up there. Send H.264: it ignored HEVC in testing.",
         "instagram": "Instagram: open Live Producer on instagram.com (desktop), copy the stream URL + key here. ≤ 4000 kbps.",
         "tiktok": "TikTok: get the server URL + key from TikTok LIVE Studio and paste both here.",
         "custom": "Any RTMP/RTMPS server, e.g. your own relay.",

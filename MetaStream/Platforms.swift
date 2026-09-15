@@ -5,7 +5,7 @@ import UIKit
 import os
 
 struct StreamCategory: Identifiable, Hashable { let id: String; let name: String }
-struct RestreamChannel: Identifiable, Hashable { let id: Int; let name: String; var active: Bool; let url: String }
+struct RestreamChannel: Identifiable, Hashable { let id: Int; let name: String; let url: String }
 
 /// Kick, Twitch, Restream, YouTube accounts: login, channel info (title/category/viewers), chat send, stream key.
 /// ponytail: tokens live in UserDefaults; move to Keychain if the phone is shared.
@@ -305,11 +305,13 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     func refreshRestream() async {
         do {
             if let p = try await restream("GET", "/user/profile") as? [String: Any] { restreamUser = p["username"] as? String ?? "" }
-            let list = (try await restream("GET", "/user/channels") as? [[String: Any]]) ?? []
+            // The list comes back wrapped: {"channels":[...]}; older docs show a bare array, so accept both.
+            let raw = try await restream("GET", "/user/channels")
+            let list = (raw as? [[String: Any]]) ?? ((raw as? [String: Any])?["channels"] as? [[String: Any]]) ?? []
             restreamChannels = list.compactMap {
                 guard let id = $0["id"] as? Int else { return nil }
                 return RestreamChannel(id: id, name: $0["displayName"] as? String ?? "channel \(id)",
-                                       active: $0["active"] as? Bool ?? true, url: $0["channelUrl"] as? String ?? "")
+                                       url: $0["channelUrl"] as? String ?? "")
             }
             if let first = restreamChannels.first, let m = try await restream("GET", "/user/channel-meta/\(first.id)") as? [String: Any] {
                 restreamTitle = m["title"] as? String ?? ""
@@ -325,13 +327,6 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         do {
             for ch in restreamChannels { _ = try await restream("PATCH", "/user/channel-meta/\(ch.id)", body: ["title": title]) }
             status = "Restream titles updated"; await refreshRestream()
-        } catch { status = error.localizedDescription }
-    }
-
-    func restreamSetActive(_ ch: RestreamChannel, _ active: Bool) async {
-        do {
-            _ = try await restream("PATCH", "/user/channel/\(ch.id)", body: ["active": active])
-            if let i = restreamChannels.firstIndex(of: ch) { restreamChannels[i].active = active }
         } catch { status = error.localizedDescription }
     }
 

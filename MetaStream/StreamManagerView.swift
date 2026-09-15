@@ -115,7 +115,7 @@ struct StreamManagerView: View {
                 Circle().fill(isLive ? .red : .gray).frame(width: 10, height: 10)
                 Text(user).bold()
                 Spacer()
-                if tab == "restream" { Text("\(platforms.restreamChannels.filter(\.active).count) destinations").foregroundStyle(.secondary) }
+                if tab == "restream" { Text("\(platforms.restreamChannels.count) destinations").foregroundStyle(.secondary) }
                 else { Text(isLive ? "\(viewers) viewers" : "offline").foregroundStyle(.secondary) }
                 Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain)
             }
@@ -157,10 +157,15 @@ struct StreamManagerView: View {
     }
 
     private var restreamChannelsSection: some View {
-        Section("Destinations") {
+        Section {
             ForEach(platforms.restreamChannels) { ch in
-                Toggle(ch.name, isOn: Binding(get: { ch.active }, set: { v in Task { await platforms.restreamSetActive(ch, v) } }))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(ch.name)
+                    Text(ch.url).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
+        } header: { Text("Destinations") } footer: {
+            Text("Add or disable destinations in the Restream dashboard; this list is read-only.")
         }
     }
 

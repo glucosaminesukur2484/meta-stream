@@ -56,8 +56,8 @@ struct ContentView: View {
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
     @AppStorage("codec") var codecPref = "auto"
     @AppStorage("platform") var platformPref = "kick"
-    /// auto: Kick and Twitch refuse or gate HEVC, everyone else takes the untouched glasses stream.
-    private var codec: String { codecPref == "auto" ? (["kick", "twitch"].contains(platformPref) ? "h264" : "hevc") : codecPref }
+    /// auto: Kick, Twitch and Restream refuse or gate HEVC; YouTube and custom relays take the untouched stream.
+    private var codec: String { codecPref == "auto" ? (["kick", "twitch", "restream"].contains(platformPref) ? "h264" : "hevc") : codecPref }
 
     @State private var showSettings = false
     @State private var showChat = false
