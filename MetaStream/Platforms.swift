@@ -5,7 +5,7 @@ import UIKit
 import os
 
 struct StreamCategory: Identifiable, Hashable { let id: String; let name: String }
-struct RestreamChannel: Identifiable, Hashable { let id: Int; let name: String; let url: String }
+struct RestreamChannel: Identifiable, Hashable { let id: Int; let name: String; let url: String; var active: Bool }
 
 /// Kick, Twitch, Restream, YouTube accounts: login, channel info (title/category/viewers), chat send, stream key.
 /// ponytail: tokens live in UserDefaults; move to Keychain if the phone is shared.
@@ -308,11 +308,16 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
             // The list comes back wrapped: {"channels":[...]}; older docs show a bare array, so accept both.
             let raw = try await restream("GET", "/user/channels")
             let list = (raw as? [[String: Any]]) ?? ((raw as? [String: Any])?["channels"] as? [[String: Any]]) ?? []
-            restreamChannels = list.compactMap {
-                guard let id = $0["id"] as? Int else { return nil }
-                return RestreamChannel(id: id, name: $0["displayName"] as? String ?? "channel \(id)",
-                                       url: $0["channelUrl"] as? String ?? "")
+            // The list omits the on/off state, so ask each channel for it. Two or three calls, once per refresh.
+            var channels: [RestreamChannel] = []
+            for c in list {
+                guard let id = c["id"] as? Int else { continue }
+                let detail = (try? await restream("GET", "/user/channels/\(id)")) as? [String: Any] ?? [:]
+                let on = detail["active"] as? Bool ?? detail["enabled"] as? Bool ?? true
+                channels.append(RestreamChannel(id: id, name: c["displayName"] as? String ?? "channel \(id)",
+                                                url: c["channelUrl"] as? String ?? "", active: on))
             }
+            restreamChannels = channels
             if let first = restreamChannels.first, let m = try await restream("GET", "/user/channel-meta/\(first.id)") as? [String: Any] {
                 restreamTitle = m["title"] as? String ?? ""
             }
@@ -328,6 +333,21 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
             for ch in restreamChannels { _ = try await restream("PATCH", "/user/channel-meta/\(ch.id)", body: ["title": title]) }
             status = "Restream titles updated"; await refreshRestream()
         } catch { status = error.localizedDescription }
+    }
+
+    /// Enables or disables one destination. Restream documents the update under the singular path; some
+    /// deployments answer on the plural one, so try both before reporting failure.
+    func restreamSetActive(_ ch: RestreamChannel, _ on: Bool) async {
+        func apply() { if let i = restreamChannels.firstIndex(where: { $0.id == ch.id }) { restreamChannels[i].active = on } }
+        do {
+            _ = try await restream("PATCH", "/user/channel/\(ch.id)", body: ["active": on])
+            apply(); status = "\(ch.name) \(on ? "enabled" : "disabled")"
+        } catch {
+            do {
+                _ = try await restream("PATCH", "/user/channels/\(ch.id)", body: ["active": on])
+                apply(); status = "\(ch.name) \(on ? "enabled" : "disabled")"
+            } catch { status = error.localizedDescription }
+        }
     }
 
     func disconnectRestream() { forget("restream"); restreamUser = ""; restreamChannels = []; restreamTitle = ""; restreamStreamKey = ""; restreamChatURL = "" }
