@@ -28,7 +28,30 @@ the operational checklist.
 6. **iPhone Developer Mode.** Settings → Privacy & Security → Developer Mode
    → on (requires a restart).
 
-## Bootstrap Team ID (two builds)
+## Signing (why a paid Apple team is needed)
+
+Since DAT SDK 0.8 the glasses' video travels over a Wi-Fi link that needs two
+entitlements, `com.apple.developer.networking.HotspotConfiguration` and
+`com.apple.developer.networking.wifi-info` (see `MetaStream/MetaStream.entitlements`).
+A free Apple ID cannot sign those, so Sideloadly builds connect over Bluetooth
+but never stream. The workflow therefore signs in CI with a development
+certificate + profile from a paid team. Repo secrets:
+
+- `P12_BASE64` / `P12_PASSWORD`: the Apple Development identity, exported from
+  Keychain Access as .p12 and base64-encoded.
+- `PROVISIONING_PROFILE_BASE64`: an "iOS App Development" profile for the
+  bundle ID with both capabilities enabled and your iPhone's UDID, base64-encoded.
+- `TEAM_ID`: the team ID of that paid team (also goes into the Meta developer
+  center and the MWDAT plist entry).
+
+Install the signed IPA over USB from Windows (no Sideloadly, no 7-day expiry):
+
+```
+pip install pymobiledevice3
+pymobiledevice3 apps install build/MetaStream.ipa
+```
+
+## Bootstrap Team ID (only for the free-Apple-ID path, historical)
 
 The Info.plist needs your Apple Team ID, but you don't know it until you've
 signed once with your free Apple ID.
