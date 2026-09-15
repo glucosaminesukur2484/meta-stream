@@ -156,7 +156,7 @@ final class Streamer: ObservableObject {
         guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
               let data = try? Data(contentsOf: url),
               let text = String(data: data, encoding: .isoLatin1),
-              let regex = try? NSRegularExpression(pattern: "<key>TeamIdentifier</key>\s*<array>\s*<string>([A-Z0-9]+)</string>"),
+              let regex = try? NSRegularExpression(pattern: #"<key>TeamIdentifier</key>\s*<array>\s*<string>([A-Z0-9]+)</string>"#),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let range = Range(match.range(at: 1), in: text)
         else { return fallback }
