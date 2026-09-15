@@ -8,7 +8,7 @@ the operational checklist.
 
 1. **Meta developer account.** Sign up at https://wearables.developer.meta.com.
    Create a project named `MetaStream`, platform iOS, bundle ID
-   `com.saeed.metastream` (no hyphens allowed in the bundle ID — Meta firmware
+   `com.saeedkolivand.metastream` (no hyphens allowed in the bundle ID — Meta firmware
    rule). Leave Apple Team ID blank for now; you'll fill it in during the
    bootstrap build (step 4). Copy the **MetaAppID** and **ClientToken** it
    gives you.

@@ -1,6 +1,6 @@
 name: MetaStream
 options:
-  bundleIdPrefix: com.saeed
+  bundleIdPrefix: com.saeedkolivand
   deploymentTarget:
     iOS: "17.2"
   xcodeVersion: "26.4"
@@ -22,7 +22,7 @@ targets:
     settings:
       base:
         INFOPLIST_FILE: MetaStream/Info.plist
-        PRODUCT_BUNDLE_IDENTIFIER: com.saeed.metastream
+        PRODUCT_BUNDLE_IDENTIFIER: com.saeedkolivand.metastream
         ARCHS: arm64
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: minimal
