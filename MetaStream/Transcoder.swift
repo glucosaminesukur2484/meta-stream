@@ -46,6 +46,11 @@ final class Transcoder: @unchecked Sendable {
         if status != noErr {
             failures += 1
             if failures == 1 || failures % 100 == 0 { applog("stream", "HEVC decode failed: \(status) (x\(failures))", error: true) }
+            // -12903 kVTInvalidSessionErr: iOS killed the hardware decoder because the app went to the background.
+            // Drop the session so the next frame recreates it; that fails while backgrounded and succeeds on return.
+            if status == kVTInvalidSessionErr { invalidate() }
+        } else if failures > 0 {
+            applog("stream", "HEVC decoder recovered after \(failures) failed frames"); failures = 0
         }
     }
 

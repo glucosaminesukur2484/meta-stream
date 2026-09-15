@@ -26,7 +26,7 @@ struct SettingsView: View {
         "restream": "rtmp://live.restream.io/live",
     ]
     private static let hints: [String: String] = [
-        "kick": "Kick accepts up to 8000 kbps, H.264 only.",
+        "kick": "Kick accepts up to 8000 kbps, H.264 only. H.264 needs the phone's decoder, which iOS stops in the background: for background streaming to Kick, go through Restream instead.",
         "twitch": "Twitch: up to 6000 kbps (8000 for Partners). HEVC only for Affiliates/Partners.",
         "youtube": "YouTube: up to ~9000 kbps at 1080p. Create the stream in YouTube Studio first.",
         "restream": "Restream re-encodes to H.264 for every destination, so Twitch works even without Affiliate.",
