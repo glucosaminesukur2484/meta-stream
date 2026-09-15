@@ -2,6 +2,7 @@ import Foundation
 import AuthenticationServices
 import CryptoKit
 import UIKit
+import os
 
 struct StreamCategory: Identifiable, Hashable { let id: String; let name: String }
 struct RestreamChannel: Identifiable, Hashable { let id: Int; let name: String; var active: Bool; let url: String }
@@ -10,7 +11,7 @@ struct RestreamChannel: Identifiable, Hashable { let id: Int; let name: String; 
 /// ponytail: tokens live in UserDefaults; move to Keychain if the phone is shared.
 @MainActor
 final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
-    @Published var status = ""
+    @Published var status = "" { didSet { applog("api", "status: \(status)") } }
 
     // Kick
     @Published var kickUser = ""
@@ -90,8 +91,11 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     /// Opens the system auth sheet and hands back the `code` query item (nil if cancelled).
     private func authorize(_ url: URL, scheme: String) async -> String? {
         await withCheckedContinuation { cont in
-            let s = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { url, _ in
-                let code = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "code" })?.value }
+            applog("auth", "authorize \(url.host ?? "?")\(url.path) scheme=\(scheme)")
+            let s = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { url, error in
+                let items = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+                let code = items.first(where: { $0.name == "code" })?.value
+                applog("auth", "callback url=\(url?.host ?? "nil")\(url?.path ?? "") params=\(items.map(\.name)) code=\(code == nil ? "missing" : "ok") error=\(error.map { String(describing: $0) } ?? "none")", error: code == nil)
                 cont.resume(returning: code)
             }
             s.presentationContextProvider = self
@@ -436,6 +440,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        applog("api", "\(method) \(c.url!.absoluteString) -> \(code) \(String(decoding: data.prefix(700), as: UTF8.self))", error: code >= 400)
         if code == 401, !retried {
             try await refresh()
             return try await callAny(method, url, query: query, body: body, tokenKey: tokenKey, headers: headers, refresh: refresh, retried: true)
@@ -462,6 +467,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         req.httpBody = c.percentEncodedQuery?.data(using: .utf8)
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        applog("auth", "POST \(url) [\(fields.keys.sorted().joined(separator: ","))] -> \(code) \(code < 300 ? "ok" : String(decoding: data.prefix(400), as: UTF8.self))", error: code >= 400)
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         guard allowError || (200..<300).contains(code) else { throw err("HTTP \(code): \(String(data: data, encoding: .utf8) ?? "")") }
         return json
@@ -477,5 +483,5 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         return String((0..<n).map { _ in chars.randomElement()! })
     }
 
-    private static func err(_ s: String) -> NSError { NSError(domain: "Platforms", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
+    private static func err(_ s: String) -> NSError { applog("api", "error: \(s)", error: true); return NSError(domain: "Platforms", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
 }

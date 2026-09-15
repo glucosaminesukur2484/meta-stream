@@ -4,6 +4,7 @@ import AVFoundation
 import CoreMedia
 import VideoToolbox
 import UIKit
+import os
 import MWDATCore
 import MWDATCamera
 import HaishinKit
@@ -25,9 +26,9 @@ private final class Hot: @unchecked Sendable {
 @MainActor
 final class Streamer: ObservableObject {
     @Published var registration = "unknown"
-    @Published var glassesState = "idle"
+    @Published var glassesState = "idle" { didSet { applog("glasses", "\(glassesState)") } }
     @Published var glassesOn = false
-    @Published var rtmpState = "idle"
+    @Published var rtmpState = "idle" { didSet { applog("stream", "rtmp: \(rtmpState)") } }
     @Published var frames = 0
     @Published var fps = 0
     @Published var kbps = 0
@@ -35,7 +36,7 @@ final class Streamer: ObservableObject {
     @Published var live = false { didSet { hot.live = live } }
     @Published var liveSince: Date?
     @Published var devices = "none seen yet"
-    @Published var source = "glasses" { didSet { hot.forward = source == "glasses" && !cameraOff } }   // what is going out right now
+    @Published var source = "glasses" { didSet { hot.forward = source == "glasses" && !cameraOff; applog("stream", "source=\(source) manual=\(manualSource)") } }   // what is going out right now
     @Published var manualSource = "auto"       // "auto" | "glasses" | "back" | "front" (user's choice)
     @Published var mics: [Mic] = []
     @Published var muted = false
@@ -75,6 +76,9 @@ final class Streamer: ObservableObject {
 
     init() {
         teamID = Self.readTeamID()
+        LBLogger.with(kHaishinKitIdentifier).level = .info
+        LBLogger.with(kRTMPHaishinKitIdentifier).level = .info
+        applog("ui", "launch team=\(teamID)")
         refreshMics()
         Task { [weak self] in
             for await state in Wearables.shared.registrationStateStream() {
@@ -305,12 +309,14 @@ final class Streamer: ObservableObject {
         // Category only; activating here kept the mic "in use" (orange dot) even when idle.
         try? s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
         mics = (s.availableInputs ?? []).map { Mic(id: $0.uid, name: $0.portName) }
+        applog("stream", "mics: \(mics.map(\.name))")
     }
 
     /// Camera off = detach any phone camera, stop forwarding glasses frames, and push black frames at 15 fps
     /// so the platform keeps a live video track instead of freezing on the last picture.
     func setCameraOff(_ off: Bool) {
         cameraOff = off
+        applog("stream", "cameraOff=\(off)")
         blackTask?.cancel(); blackTask = nil
         guard off else { evaluateSource(); return }
         Task { try? await mixer.attachVideo(nil) }
@@ -344,6 +350,7 @@ final class Streamer: ObservableObject {
 
     func setMuted(_ on: Bool) {
         muted = on
+        applog("stream", "muted=\(on)")
         Task {   // ponytail: mute = detach the mic; AudioMixerSettings per-track flags avoided
             try? await mixer.attachAudio(on ? nil : AVCaptureDevice.default(for: .audio))
         }
@@ -377,7 +384,12 @@ final class Streamer: ObservableObject {
                     expectedFrameRate: 30))
                 try? await stream.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
 
+                applog("stream", "connecting to \(url) key=\(key.count) chars, mic=\(micUID.isEmpty ? "default" : micUID), bitrate=\(bitrateKbps)")
+                Task { [connection] in                       // every NetConnection.* / NetStream.* status the server sends
+                    for await st in await connection.status { applog("stream", "rtmp status: \(st.code) \(st.description)") }
+                }
                 _ = try await connection.connect(url)
+                applog("stream", "connected, publishing")
                 _ = try await stream.publish(key)
                 live = true
                 liveSince = Date()
@@ -391,6 +403,7 @@ final class Streamer: ObservableObject {
                         // ponytail: fixed 3 s retry, no backoff
                         if !(await self.connection.connected) {
                             self.rtmpState = "reconnecting"
+                            applog("stream", "reconnect attempt", error: true)
                             _ = try? await self.connection.connect(url)
                             _ = try? await self.stream.publish(key)
                             if await self.connection.connected { self.rtmpState = "live" }
@@ -398,6 +411,7 @@ final class Streamer: ObservableObject {
                     }
                 }
             } catch {
+                applog("stream", "goLive failed: \(String(describing: error))", error: true)
                 rtmpState = error.localizedDescription
             }
         }

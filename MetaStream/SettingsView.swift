@@ -98,6 +98,10 @@ struct SettingsView: View {
                     Toggle("Keep screen awake", isOn: $keepAwake)
                 }
 
+                Section("Logs") {
+                    NavigationLink("View logs") { LogView() }
+                }
+
                 Section("About") {
                     row("Apple Team ID", streamer.teamID)
                     row("Meta registration", streamer.registration)
