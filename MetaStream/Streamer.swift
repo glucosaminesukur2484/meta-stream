@@ -16,6 +16,7 @@ final class Streamer: ObservableObject {
     @Published var frames = 0
     @Published var teamID = "unknown (not sideloaded yet)"
     @Published var live = false
+    @Published var devices = "none seen yet"
 
     // ponytail: ContentView sets this directly instead of a delegate protocol.
     weak var preview: AVSampleBufferDisplayLayer?
@@ -27,8 +28,6 @@ final class Streamer: ObservableObject {
     private let connection = RTMPConnection()          // advertises hvc1 in the enhanced-RTMP connect by default
     private lazy var stream = RTMPStream(connection: connection)
     private let mixer = MediaMixer()
-
-    @Published var devices = "none seen yet"
 
     init() {
         teamID = Self.readTeamID()
@@ -52,6 +51,7 @@ final class Streamer: ObservableObject {
         }
     }
 
+    // Same order as Meta's CameraAccess sample: session.start() → wait for .started → addCamera → stream.start().
     func startGlasses() {
         Task {
             do {
@@ -82,20 +82,38 @@ final class Streamer: ObservableObject {
 
                 let session = try Wearables.shared.createSession(deviceSelector: selector)
                 self.session = session
+                tokens.append(session.statePublisher.listen { [weak self] state in
+                    Task { @MainActor in self?.glassesState = "session \(state.description)" }
+                })
+                tokens.append(session.errorPublisher.listen { [weak self] error in
+                    Task { @MainActor in
+                        self?.glassesState = "session error: \(error.description)"
+                        if error == .datAppOnTheGlassesUpdateRequired { try? await Wearables.shared.openDATGlassesAppUpdate() }
+                    }
+                })
+                try session.start()
+
+                // Wait until the device link is up; addCamera returns nil before that.
+                tries = 0
+                while session.state != .started, tries < 60 {           // ponytail: 30 s ceiling
+                    if session.state == .stopped { return }             // error listener already reported why
+                    try await Task.sleep(for: .milliseconds(500)); tries += 1
+                }
+                guard session.state == .started else { glassesState = "session never reached started (\(session.state.description))"; return }
 
                 // hvc1 = compressed HEVC, keeps delivering while the app is in the background. .high = 720x1280.
                 let config = StreamConfiguration(videoCodec: .hvc1, resolution: .high, frameRate: 30)
                 guard let camera = try session.addCamera(config: config) else {
-                    glassesState = "no camera"
+                    glassesState = "addCamera returned nil"
                     return
                 }
                 self.camera = camera
 
                 tokens.append(camera.stream.statePublisher.listen { [weak self] state in
-                    Task { @MainActor in self?.glassesState = String(describing: state) }
+                    Task { @MainActor in self?.glassesState = "stream \(state)" }
                 })
                 tokens.append(camera.stream.errorPublisher.listen { [weak self] error in
-                    Task { @MainActor in self?.glassesState = error.localizedDescription }
+                    Task { @MainActor in self?.glassesState = "stream error: \(error.description)" }
                 })
                 tokens.append(camera.stream.videoFramePublisher.listen { [weak self] frame in
                     Task { @MainActor in
@@ -110,16 +128,7 @@ final class Streamer: ObservableObject {
                         }
                     }
                 })
-
-                tokens.append(session.errorPublisher.listen { [weak self] error in
-                    Task { @MainActor in
-                        self?.glassesState = "session: \(error.description)"
-                        if error == .datAppOnTheGlassesUpdateRequired { try? await Wearables.shared.openDATGlassesAppUpdate() }
-                    }
-                })
-                try session.start()
                 camera.stream.start()
-                glassesState = "starting"
             } catch DeviceSessionError.datAppOnTheGlassesUpdateRequired {
                 glassesState = "glasses need the Meta app update, opening Meta AI"
                 try? await Wearables.shared.openDATGlassesAppUpdate()
@@ -133,6 +142,8 @@ final class Streamer: ObservableObject {
         camera?.stream.stop()
         camera?.stop()
         session?.stop()
+        camera = nil
+        session = nil
         tokens.removeAll()
         glassesState = "stopped"
     }
