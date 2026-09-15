@@ -38,7 +38,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     private static let kickID = info["KickClientID"] as? String ?? ""
     private static let kickSecret = info["KickClientSecret"] as? String ?? ""
     private static let twitchID = info["TwitchClientID"] as? String ?? ""
-    static let kickRedirect = "https://saeedkolivand.github.io/meta-stream/oauth.html"
+    static let kickRedirect = "https://metastream.iamsaeed.dev/oauth.html"   // GitHub Pages (docs/) behind a custom domain
     static let kickIngest = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     static let twitchIngest = "rtmps://live.twitch.tv:443/app/"
 
