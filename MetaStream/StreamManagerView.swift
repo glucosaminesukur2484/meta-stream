@@ -5,7 +5,7 @@ struct StreamManagerView: View {
     @EnvironmentObject var platforms: Platforms
     @Environment(\.dismiss) private var dismiss
     @AppStorage("platform") var platformPref = "kick"
-    @AppStorage("rtmpURL") var rtmpURL = Platforms.kickIngest
+    @AppStorage("rtmpURL") var ingestURL = Platforms.kickIngest
     @AppStorage("streamKey") var streamKey = ""
     @AppStorage("chatSite") var chatSite = "kick"
     @AppStorage("chatChannel") var chatChannel = ""
@@ -69,7 +69,7 @@ struct StreamManagerView: View {
                 } else {
                     headerSection
                     infoSection
-                    if tab == "restream" { restreamChannelsSection }
+                    if tab == "restream" { restreamDestinationsSection }
                     keySection
                     if canSendChat { chatSection }
                     Section {
@@ -126,7 +126,7 @@ struct StreamManagerView: View {
                 Circle().fill(isLive ? .red : .gray).frame(width: 10, height: 10)
                 Text(user).bold()
                 Spacer()
-                if tab == "restream" { Text("\(platforms.restreamChannels.filter(\.active).count)/\(platforms.restreamChannels.count) destinations").foregroundStyle(.secondary) }
+                if tab == "restream" { Text("\(platforms.restreamDestinations.filter(\.active).count)/\(platforms.restreamDestinations.count) destinations").foregroundStyle(.secondary) }
                 else { Text(isLive ? "\(viewers) viewers" : "offline").foregroundStyle(.secondary) }
                 Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain)
             }
@@ -203,9 +203,9 @@ struct StreamManagerView: View {
         }
     }
 
-    private var restreamChannelsSection: some View {
+    private var restreamDestinationsSection: some View {
         Section {
-            ForEach(platforms.restreamChannels) { ch in
+            ForEach(platforms.restreamDestinations) { ch in
                 Toggle(isOn: Binding(get: { ch.active }, set: { v in Task { await platforms.restreamSetActive(ch, v) } })) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(ch.name)
@@ -226,7 +226,7 @@ struct StreamManagerView: View {
                 Spacer()
                 Button("Use for streaming") {
                     platformPref = tab
-                    rtmpURL = ingest
+                    ingestURL = ingest
                     streamKey = streamKeyValue
                     chatSite = tab
                     if tab == "restream" { restreamChatURL = platforms.restreamChatURL }
