@@ -130,6 +130,7 @@ struct ContentView: View {
             VStack {
                 hud
                 Spacer()
+                quickControls
                 controls
             }
             .padding(.horizontal)
@@ -221,14 +222,6 @@ struct ContentView: View {
                     pill(streamer.source == "phone" ? "iphone" : "eyeglasses",
                          streamer.manualSource == "auto" ? "auto · \(streamer.source)" : streamer.manualSource,
                          streamer.source == "phone" ? .orange : .white)
-                }
-                .buttonStyle(.plain)
-                Button { tap(); streamer.setMuted(!streamer.muted) } label: {
-                    pill(streamer.muted ? "mic.slash.fill" : "mic.fill", streamer.muted ? "muted" : "mic", streamer.muted ? .orange : .white)
-                }
-                .buttonStyle(.plain)
-                Button { tap(); streamer.setCameraOff(!streamer.cameraOff) } label: {
-                    pill(streamer.cameraOff ? "video.slash.fill" : "video.fill", streamer.cameraOff ? "cam off" : "cam", streamer.cameraOff ? .orange : .white)
                 }
                 .buttonStyle(.plain)
                 Button { tap(); speaker.muted.toggle() } label: {
@@ -353,6 +346,48 @@ struct ContentView: View {
             roundButton("gearshape.fill", filled: false) { tap(); showSettings = true }
         }
         .padding(.bottom, 12)
+    }
+
+    /// Mic, camera and privacy, fixed and always on screen. These are the controls you need in the second
+    /// something goes wrong, so they must never live in the scrolling status strip where a long run of
+    /// pills can push them off the edge — you cannot scroll a pill row one-handed while walking.
+    private var quickControls: some View {
+        HStack(spacing: 12) {
+            quickButton("mic.slash.fill", "mic.fill", on: !streamer.muted, label: streamer.muted ? "Muted" : "Mic") {
+                streamer.setMuted(!streamer.muted)
+            }
+            quickButton("video.slash.fill", "video.fill", on: !streamer.cameraOff, label: streamer.cameraOff ? "Hidden" : "Camera") {
+                streamer.setCameraOff(!streamer.cameraOff)
+            }
+            // Amber "next stream" when blur is on but this session is passthrough: there is no decoded
+            // frame to obscure, so saying it is active would be a lie about a privacy feature.
+            quickButton("eye.slash.fill", "eye.fill", on: blurOn,
+                        pending: blurOn && streamer.live && !streamer.transcoding,
+                        label: blurOn ? (streamer.live && !streamer.transcoding ? "Next stream" : "Blur on") : "Blur off") {
+                blurOn.toggle()
+            }
+        }
+        .padding(.bottom, 10)
+    }
+
+    private func quickButton(_ onIcon: String, _ offIcon: String, on: Bool, pending: Bool = false,
+                             label: String, action: @escaping () -> Void) -> some View {
+        Button {
+            tap(strong: true)
+            action()
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: on ? onIcon : offIcon)
+                    .font(.system(size: 20, weight: .semibold))
+                Text(label).font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(pending ? .black : (on ? .black : .white))
+            .frame(maxWidth: .infinity)
+            .frame(height: 56)
+            .background(pending ? AnyShapeStyle(.orange) : (on ? AnyShapeStyle(.white) : AnyShapeStyle(.ultraThinMaterial)),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private func roundButton(_ icon: String, filled: Bool, action: @escaping () -> Void) -> some View {

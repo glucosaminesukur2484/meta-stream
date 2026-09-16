@@ -118,6 +118,10 @@ final class Streamer: ObservableObject {
     @Published var thermal: ProcessInfo.ThermalState = .nominal { didSet { checkThermal() } }
 
     // MARK: adaptive bitrate (active whenever phoneEncodes is true — see below)
+    /// True when HaishinKit decodes+re-encodes this session. Blur can only apply to a frame we decode,
+    /// so a passthrough session cannot start blurring mid-stream — the quick control says so rather than
+    /// pretending the toggle worked.
+    @Published private(set) var transcoding = false
     @Published var currentBitrateKbps = 0     // live value for the HUD; == configured target while phoneEncodes is false
     private var bitrateCeilingKbps = 0        // user's configured bitrateKbps; up-steps never exceed this
     private var thermalCeilingKbps: Int?      // set while thermal >= .serious; caps the ceiling until it clears
@@ -674,6 +678,7 @@ final class Streamer: ObservableObject {
         // session where phoneEncodes never goes true, and source/cameraOff can flip phoneEncodes mid-session
         // (glasses -> phone fallback) independent of the codec picked here.
         Task { [up = uplink] in await up.setBitRateStrategy(QueueWatcher(hot: hot)) }
+        transcoding = h264
         if h264 {
             let mixer = self.mixer, hot = self.hot
             // Warm-up decodes to get the decoder synced to a keyframe, but nothing reaches the encoder until
