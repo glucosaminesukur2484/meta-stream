@@ -38,6 +38,14 @@ import Vision
     nonisolated(unsafe) var enabled = false   // off by default: blur is an opt-in cost (see the ADR)
 
     nonisolated private static let detectEveryNFrames = 5
+    nonisolated private static let textEveryNPasses = 2  // text is Vision's costliest request here (full-frame region
+                                                           // scan vs. faces' landmark-free rect pass) -- a busy back-camera
+                                                           // scene (signage, plates, storefronts) pays for it every pass
+                                                           // even though text moves far less between passes than a face
+                                                           // can. Halved, with the last boxes carried forward (see
+                                                           // textBoxes/runDetection below) so coverage never gaps -- detection's
+                                                           // own due-cadence and the stall clock (markDetected) are untouched,
+                                                           // faces/barcodes and lastDetectionOK still refresh every due pass.
     nonisolated private static let detectAtLeastEvery: TimeInterval = 0.4   // frame-count alone is meaningless when the render rate is low              // ~6 detections/s at 30fps, well inside the 33ms/frame budget shared with decode+encode
     nonisolated private static let detectionMaxDimension: CGFloat = 360 // boxes are normalized, so a small detection frame costs nothing downstream
     nonisolated private static let padFraction: CGFloat = 0.3           // generous margin: motion between detections is the risk, not one frame of under-blur
@@ -52,6 +60,8 @@ import Vision
     nonisolated(unsafe) private let sequenceHandler = VNSequenceRequestHandler()
 
     nonisolated(unsafe) private var frameCount = 0
+    nonisolated(unsafe) private var detectionPassCount = 0   // counts actual runDetection() calls, not rendered frames
+    nonisolated(unsafe) private var textBoxes: [CGRect] = []  // last text detection, carried across skipped passes
     nonisolated(unsafe) private var boxes: [CGRect] = []     // normalized, already padded
     nonisolated(unsafe) private var lastDetectionOK = Date() // "just started" reads as healthy, not stalled
     nonisolated(unsafe) private var stalledShadow = false
@@ -94,11 +104,18 @@ import Vision
     // MARK: detection
 
     nonisolated private func runDetection(on image: CIImage) {
+        detectionPassCount += 1
+        let runText = options.text && Self.textDetectionDue(pass: detectionPassCount, everyN: Self.textEveryNPasses, hasCarriedBoxes: !textBoxes.isEmpty)
         let faceReq = options.faces ? VNDetectFaceRectanglesRequest() : nil
-        let textReq = options.text ? VNDetectTextRectanglesRequest() : nil       // region only, no OCR -- also catches plates/badges/receipts/screens for free
+        let textReq = runText ? VNDetectTextRectanglesRequest() : nil       // region only, no OCR -- also catches plates/badges/receipts/screens for free
         let barcodeReq = options.barcodes ? VNDetectBarcodesRequest() : nil
         let requests: [VNRequest] = [faceReq, textReq, barcodeReq].compactMap { $0 }
-        guard !requests.isEmpty else { lastDetectionCounts = (0, 0, 0); markDetected([]); return }
+        guard !requests.isEmpty else {
+            let texts = options.text ? textBoxes : []
+            lastDetectionCounts = (0, texts.count, 0)
+            markDetected(texts)   // nothing to detect this pass beyond text we already know about (if any)
+            return
+        }
 
         // Downscale before handing Vision the frame -- boxes are normalized, so detection resolution is
         // free downstream. No pixel-buffer render needed: Vision takes a CIImage directly.
@@ -114,7 +131,15 @@ import Vision
             // sidesteps relying on VNDetectedObjectObservation's cast succeeding for every observation type
             // and gives an exact per-detector count for free -- see logDiagnosticIfDue.
             let faces = (faceReq?.results ?? []).map { Self.pad($0.boundingBox, by: Self.padFraction) }
-            let texts = (textReq?.results ?? []).map { Self.pad($0.boundingBox, by: Self.padFraction) }
+            let texts: [CGRect]
+            if !options.text {
+                texts = []; textBoxes = []
+            } else if runText {
+                texts = (textReq?.results ?? []).map { Self.pad($0.boundingBox, by: Self.padFraction) }
+                textBoxes = texts
+            } else {
+                texts = textBoxes   // not this pass's turn -- reuse the last detection rather than go blank
+            }
             let barcodes = (barcodeReq?.results ?? []).map { Self.pad($0.boundingBox, by: Self.padFraction) }
             lastDetectionCounts = (faces.count, texts.count, barcodes.count)
             markDetected(faces + texts + barcodes)
@@ -158,6 +183,12 @@ import Vision
     nonisolated static func isExpired(lastDetection: Date, now: Date, maxAge: TimeInterval) -> Bool {
         now.timeIntervalSince(lastDetection) > maxAge
     }
+
+    /// True when this detection pass should re-run text detection rather than reuse the carried boxes --
+    /// always on the very first pass (nothing carried yet), otherwise every `everyN`th pass.
+    nonisolated static func textDetectionDue(pass: Int, everyN: Int, hasCarriedBoxes: Bool) -> Bool {
+        !hasCarriedBoxes || pass % everyN == 0
+    }
 }
 
 #if DEBUG
@@ -184,6 +215,10 @@ extension Privacy {
         let t0 = Date()
         assert(!isExpired(lastDetection: t0, now: t0.addingTimeInterval(0.5), maxAge: 5), "inside the carry window")
         assert(isExpired(lastDetection: t0, now: t0.addingTimeInterval(6), maxAge: 5), "past the carry window")
+
+        assert(textDetectionDue(pass: 1, everyN: 2, hasCarriedBoxes: false), "first pass always runs text -- nothing carried yet to fall back on")
+        assert(!textDetectionDue(pass: 1, everyN: 2, hasCarriedBoxes: true), "off-cadence pass skips once boxes are already carried")
+        assert(textDetectionDue(pass: 2, everyN: 2, hasCarriedBoxes: true), "every Nth pass re-runs regardless of carried boxes")
 
         print("Privacy.demo() ok")
     }
