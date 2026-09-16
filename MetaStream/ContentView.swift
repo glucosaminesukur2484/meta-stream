@@ -55,6 +55,7 @@ struct ContentView: View {
     @AppStorage("phoneHeight") var phoneHeight = 720
     @AppStorage("phoneLandscape") var phoneLandscape = false
     @AppStorage("phoneFps") var phoneFps = 30
+    @AppStorage("phoneStabilization") var phoneStabilization = "off"
     @AppStorage("codec") var codecPref = "auto"
     @AppStorage("platform") var platformPref = "kick"
     /// auto: only YouTube (enhanced RTMP) and custom servers take the glasses' HEVC untouched. Kick, Restream,
@@ -241,7 +242,7 @@ struct ContentView: View {
         if voiceYouTube, platforms.ytConnected { chat.startYouTube(platforms: platforms); origins += 1 } else { chat.stopYouTube() }
         // Only prefix "on Kick, …" when more than one origin is live — otherwise it's noise on every line.
         speaker.showOrigin = origins > 1
-        Task { await emotes.load(twitchLogin: platforms.twitchConnected ? platforms.twitchUser : nil) }
+        Task { await emotes.load(twitchID: platforms.twitchConnected ? platforms.twitchUserID : nil) }
     }
 
     /// Shows what is actually on air, not what was asked for — on auto those differ whenever the
@@ -334,7 +335,8 @@ struct ContentView: View {
                     streamer.goLive(url: ingestURL, key: streamKey, micUID: micUID,
                                     fallbackPosition: fallbackCamera == "front" ? .front : .back,
                                     bitrateKbps: bitrateKbps, codec: codec, srtLatencyMs: srtLatencyMs,
-                                    quality: .init(height: phoneHeight, landscape: phoneLandscape, fps: phoneFps))
+                                    quality: .init(height: phoneHeight, landscape: phoneLandscape, fps: phoneFps,
+                                                   stabilization: phoneStabilization))
                 }
             } label: {
                 ZStack {
