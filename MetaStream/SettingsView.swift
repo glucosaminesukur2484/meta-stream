@@ -174,8 +174,9 @@ struct CameraSettingsView: View {
     @AppStorage("camGridOn") var camGridOn = false
     @AppStorage("camLevelOn") var camLevelOn = false
 
-    // Re-probed whenever lens or position changes -- front/back and wide/ultrawide/telephoto genuinely
-    // differ in what they support, so a stale probe would grey out (or wrongly enable) the wrong controls.
+    // Re-probed whenever the fallback position changes -- front/back genuinely differ in what they
+    // support, so a stale probe would grey out (or wrongly enable) the wrong controls. Lens no longer
+    // changes what's probed (see refresh()'s doc).
     @State private var cap: CameraCapabilities?
     @State private var formatCaps: CameraFormatCapabilities?
 
@@ -185,7 +186,7 @@ struct CameraSettingsView: View {
         Form {
             if cap == nil {
                 Section {
-                    Text("No camera found for this lens/position on this device (expected in Simulator). Settings below still save, but can't be checked against real hardware here.")
+                    Text("No camera found for this position on this device (expected in Simulator). Settings below still save, but can't be checked against real hardware here.")
                         .foregroundStyle(.orange)
                 }
             }
@@ -199,11 +200,22 @@ struct CameraSettingsView: View {
             Section {
                 Picker("Camera", selection: $fallbackCamera) { Text("Back").tag("back"); Text("Front").tag("front") }
                     .pickerStyle(.segmented)
-                Picker("Lens", selection: $camLens) {
+                // Wide/ultra-wide/telephoto share one physical camera now (see CameraSettings.
+                // captureDevice's doc), so picking a lens here just sets the starting zoom to that lens's
+                // switch-over factor -- same thing the live lens buttons do (ContentView's liveControlRow).
+                // camLens itself is no longer a device selector, only which button is highlighted.
+                Picker("Lens", selection: Binding(
+                    get: { camLens },
+                    set: { newLens in
+                        camLens = newLens
+                        if let opt = CameraSettings.lensOptions(position: position).first(where: { $0.lens.rawValue == newLens }) {
+                            camZoom = opt.zoomFactor
+                        }
+                    })) {
                     ForEach(CameraLens.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
                 }
             } header: { Text("Lens") } footer: {
-                Text("Also the fallback camera used automatically while the glasses are disconnected. A lens this iPhone doesn't have (e.g. telephoto on a non-Pro model) falls back to the wide lens.")
+                Text("Sets the starting zoom for that lens's framing next time the phone camera attaches -- also the fallback camera used automatically while the glasses are disconnected. A lens this iPhone doesn't have (e.g. telephoto on a non-Pro model) is skipped.")
             }
 
             Section("Zoom") {
@@ -308,22 +320,30 @@ struct CameraSettingsView: View {
                         Picker("Frame rate", selection: $phoneFps) {
                             ForEach(res.frameRates, id: \.self) { Text("\($0)").tag($0) }
                         }
-                        Picker("Stabilisation", selection: $phoneStabilization) {
-                            ForEach(res.stabilizationModes, id: \.self) { Text(stabilizationLabel($0)).tag($0) }
-                        }
                     } else {
-                        Text("No capture format info for this lens (expected in Simulator). Resolution/frame rate/stabilisation below keep whatever was last saved.")
+                        Text("No capture format info for this position (expected in Simulator). Resolution/frame rate below keep whatever was last saved.")
                             .foregroundStyle(.orange)
                     }
+                    // Stabilisation used to disappear along with Resolution/Frame rate whenever
+                    // CameraFormatCapabilities.probe came back empty -- the one live control (see
+                    // ContentView's liveControlRow .stabilization case, an unconditional Menu) that wasn't
+                    // reachable from Settings in that case. Same phoneStabilization key either way; offers
+                    // this resolution's supported modes when format info is known, the full set otherwise,
+                    // so it's never simply missing.
+                    Picker("Stabilisation", selection: $phoneStabilization) {
+                        let modes = formatCaps?.resolutions.first(where: { $0.height == phoneHeight })?.stabilizationModes
+                            ?? formatCaps?.resolutions.first?.stabilizationModes
+                            ?? ["off", "standard", "cinematic", "action"]
+                        ForEach(modes, id: \.self) { Text(stabilizationLabel($0)).tag($0) }
+                    }
                 } header: { Text("Resolution & stabilisation") } footer: {
-                    Text("Options come straight off this lens's supported capture formats, so they change per lens/device and per resolution — nothing here is offered unless this camera can actually do it. Stabilisation crops the picture and the stronger modes add capture latency, so Standard is the safe pick for a live stream and Action is for rough movement you would otherwise not be able to watch. Fixed for the whole stream — set it before going live.")
+                    Text("Resolution and frame rate come straight off this camera's supported capture formats, so they change per device and per resolution — nothing here is offered unless this camera can actually do it. Stabilisation crops the picture and the stronger modes add capture latency, so Standard is the safe pick for a live stream and Action is for rough movement you would otherwise not be able to watch. Fixed for the whole stream — set it before going live.")
                 }
             }
         }
         .navigationTitle("Camera")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: refresh)
-        .onChange(of: camLens) { _, _ in refresh() }
         .onChange(of: phoneHeight) { _, newHeight in
             // Changing resolution can invalidate the stored fps/stabilisation (they're interdependent --
             // a format that does 4K60 may not do 4K120) -- snap both to something this resolution actually
@@ -348,13 +368,14 @@ struct CameraSettingsView: View {
         if !res.stabilizationModes.contains(phoneStabilization) { phoneStabilization = res.nearestStabilization(to: phoneStabilization) }
     }
 
-    /// Re-probed whenever lens or position changes, like `cap` above. Also snaps the stored resolution
-    /// (and, via snapToResolution, fps/stabilisation) to the nearest one this lens actually supports --
-    /// keeps a previously-saved 1080p/30 choice intact on hardware that still supports it, but never
-    /// leaves the picker pointed at a resolution this camera can't shoot.
+    /// Re-probed whenever position changes, like `cap` above -- lens no longer selects a different device
+    /// (see CameraSettings.captureDevice's doc), so it doesn't affect what's probed here any more. Also
+    /// snaps the stored resolution (and, via snapToResolution, fps/stabilisation) to the nearest one this
+    /// camera actually supports -- keeps a previously-saved 1080p/30 choice intact on hardware that still
+    /// supports it, but never leaves the picker pointed at a resolution this camera can't shoot.
     private func refresh() {
-        cap = CameraCapabilities.probe(lens: camLens, position: position)
-        formatCaps = CameraFormatCapabilities.probe(lens: camLens, position: position)
+        cap = CameraCapabilities.probe(position: position)
+        formatCaps = CameraFormatCapabilities.probe(position: position)
         guard let res = formatCaps?.nearestResolution(to: phoneHeight) else { return }
         if res.height != phoneHeight { phoneHeight = res.height }
         snapToResolution(res)

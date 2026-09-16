@@ -175,8 +175,8 @@ final class Streamer: ObservableObject {
     /// stream, many times a second.
     private(set) var cameraDevice: AVCaptureDevice?
     /// What the live control strip can offer for the currently attached device -- the same struct/probe
-    /// SettingsView's Camera screen uses (CameraCapabilities.probe), refreshed on every attach so front/back
-    /// and lens differences show up immediately instead of stale-showing whatever the last camera supported.
+    /// SettingsView's Camera screen uses (CameraCapabilities.probe), refreshed on every attach so a
+    /// front/back switch shows up immediately instead of stale-showing whatever the last camera supported.
     @Published private(set) var cameraCapabilities: CameraCapabilities?
     /// Mirrors fallbackPosition (private, below) for the live strip's lens filter -- setSource("front"/"back")
     /// can change the real attached position without touching @AppStorage("fallbackCamera") at all (that key
@@ -681,10 +681,10 @@ final class Streamer: ObservableObject {
                 // Encoded by HaishinKit in whatever geometry goLive fixed for this session, so the outgoing
                 // stream never changes format even when the source switches. Phone capture pauses in the
                 // background; glasses HEVC doesn't.
-                // Re-read fresh on every attach (not cached) so a front/back switch re-picks the lens and
+                // Re-read fresh on every attach (not cached) so a front/back switch re-picks the camera and
                 // re-runs every capability check against the NEW device -- see CameraSettings.apply's doc.
                 let camSettings = CameraSettings.loadFromDefaults()
-                let cam = CameraSettings.device(lens: camSettings.lens, position: fallbackPosition)
+                let cam = CameraSettings.captureDevice(position: fallbackPosition)
                 await wireMixer()
                 await mixer.setSessionPreset(phoneQuality.sessionPreset)
                 let mode = Self.stabilizationMode(phoneQuality.stabilization)
@@ -696,12 +696,12 @@ final class Streamer: ObservableObject {
                     }
                 }
                 if mode != .off { applog("stream", "stabilization requested: \(phoneQuality.stabilization)") }
-                applog("stream", "camera lens=\(camSettings.lens) position=\(fallbackPosition == .front ? "front" : "back")")
+                applog("stream", "camera zoom=\(String(format: "%.2f", camSettings.zoom))x position=\(fallbackPosition == .front ? "front" : "back")")
                 // ponytail: re-acquire rather than reuse `cam`. Swift 6 region isolation treats `cam` as
                 // sent once it crosses into the mixer's domain, so touching it again here is a data race by
                 // construction. AVCaptureDevice.default returns the same underlying device anyway.
-                cameraDevice = CameraSettings.device(lens: camSettings.lens, position: fallbackPosition)
-                cameraCapabilities = CameraCapabilities.probe(lens: camSettings.lens, position: fallbackPosition)
+                cameraDevice = CameraSettings.captureDevice(position: fallbackPosition)
+                cameraCapabilities = CameraCapabilities.probe(position: fallbackPosition)
                 cameraPosition = fallbackPosition
                 try? await mixer.setFrameRate(Float64(phoneQuality.fps))
                 await mixer.setVideoOrientation(phoneQuality.landscape ? .landscapeRight : .portrait)
@@ -725,27 +725,22 @@ final class Streamer: ObservableObject {
         CameraSettings.apply(CameraSettings.loadFromDefaults(), to: device, log: false)
     }
 
-    /// Lens is a different physical AVCaptureDevice, not a settable property on the one we're holding (see
-    /// CameraSettings' type doc) -- switching it re-attaches the phone camera through the normal switchTo
-    /// path, same mechanism as a front/back switch. A brief reattach glitch is fine for a discrete tap (the
-    /// Camera app's own lens switch isn't seamless either); applyCameraSettings() above exists specifically
-    /// so the continuous sliders never have to pay that cost per tick.
-    func switchLens(_ lens: String) {
-        guard source == "phone" else { return }
-        UserDefaults.standard.set(lens, forKey: "camLens")
-        Task { await switchTo(glasses: false) }
-    }
+    /// Lens buttons no longer attach a different device (see CameraSettings.captureDevice(position:)'s doc
+    /// -- the zoom-scale rewrite that fixed the ~6x-on-telephoto bug): one virtual device covers every
+    /// lens, so "switching lens" is just setting camZoom to that lens's switch-over factor and calling
+    /// applyCameraSettings() above like any other slider, no reattach. ContentView's lens buttons do this
+    /// directly now; there is no Streamer-side switchLens anymore.
 
-    /// Live stabilisation switch -- deliberately a re-attach, same mechanism as switchLens above, not a
-    /// live tweak on the existing connection. VideoDeviceUnit (where preferredVideoStabilizationMode
-    /// actually lives -- see switchTo's attachVideo configuration closure) only exists inside that closure,
-    /// isolated to the mixer actor; Streamer only keeps the plain AVCaptureDevice handle afterward (see
-    /// cameraDevice's doc), by design, for Swift 6 region-isolation safety (see switchTo's re-acquire
-    /// comment -- that's the exact rule that broke the last build here). This HaishinKit version (2.1.0+)
-    /// exposes no confirmed way to reach a live VideoDeviceUnit again post-attach (unverifiable without a
-    /// build here), so this reattaches through switchTo(glasses:) instead. The framing jump this causes is
-    /// expected anyway -- each stabilisation mode crops differently -- so the extra reattach glitch costs
-    /// little more.
+    /// Live stabilisation switch -- deliberately a re-attach, not a live tweak on the existing connection
+    /// (unlike zoom/lens above). VideoDeviceUnit (where preferredVideoStabilizationMode actually lives --
+    /// see switchTo's attachVideo configuration closure) only exists inside that closure, isolated to the
+    /// mixer actor; Streamer only keeps the plain AVCaptureDevice handle afterward (see cameraDevice's
+    /// doc), by design, for Swift 6 region-isolation safety (see switchTo's re-acquire comment -- that's
+    /// the exact rule that broke the last build here). This HaishinKit version (2.1.0+) exposes no
+    /// confirmed way to reach a live VideoDeviceUnit again post-attach (unverifiable without a build here),
+    /// so this reattaches through switchTo(glasses:) instead. The framing jump this causes is expected
+    /// anyway -- each stabilisation mode crops differently -- so the extra reattach glitch costs little
+    /// more.
     func setStabilization(_ mode: String) {
         guard source == "phone" else { return }
         UserDefaults.standard.set(mode, forKey: "phoneStabilization")
