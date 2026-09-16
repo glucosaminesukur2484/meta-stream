@@ -38,6 +38,8 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     @Published var twitchDelay = 0                    // seconds; Partner-only stream delay
     @Published var twitchLanguage = ""
     @Published private(set) var twitchScopes: Set<String> = []   // granted at last auth; see twitchHasScopes
+    @Published var twitchAdNextAt: Date?          // nil until a schedule fetch succeeds (needs channel:read:ads)
+    @Published var twitchAdSnoozeCount = 0
     private var twitchUserID = ""
     // https://dev.twitch.tv/docs/api/reference/#get-content-classification-labels — the current valid CCL ids.
     static let twitchLabelIDs = ["DebatedSocialIssuesAndPolitics", "DrugsIntoxication", "SexualThemes", "ViolentGraphic", "Gambling", "ProfanityVulgarity"]
@@ -49,6 +51,19 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         "follows": ["moderator:read:followers"],
         "subscriptions": ["channel:read:subscriptions"],
         "cheers": ["bits:read"],
+    ]
+    // Write scopes for hands-free broadcaster actions (Phase 1c) — the second and final re-auth milestone.
+    // Same "reconnect once" pattern as twitchChatScopes. Stream markers use channel:manage:broadcast, which
+    // Phase 1a already requested for title/category edits, so that action needs no new scope and has no
+    // entry here — see twitchCreateMarker.
+    static let twitchActionScopes: [String: Set<String>] = [
+        "clips": ["clips:edit"],
+        "ads": ["channel:read:ads", "channel:manage:ads"],
+        "commercial": ["channel:edit:commercial"],
+        "chat lockdown": ["moderator:manage:chat_settings"],
+        "announcements": ["moderator:manage:announcements"],
+        "raids": ["channel:manage:raids"],
+        "moderation": ["moderator:manage:chat_messages", "moderator:manage:banned_users"],
     ]
 
     // Restream
@@ -215,9 +230,12 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         Task {
             do {
                 // moderator:read:followers / channel:read:subscriptions / bits:read are read-only additions for
-                // the chat feed (follow/subscribe/cheer alerts). No write/moderation scopes here on purpose —
-                // those land with whatever milestone needs them, so a user re-authorizes at most once more.
-                let scopes = "channel:manage:broadcast channel:read:stream_key user:write:chat user:read:chat moderator:read:followers channel:read:subscriptions bits:read"
+                // the chat feed (follow/subscribe/cheer alerts, Phase 1b). clips:edit / channel:read:ads /
+                // channel:manage:ads / channel:edit:commercial / moderator:manage:chat_settings /
+                // moderator:manage:announcements / channel:manage:raids / moderator:manage:chat_messages /
+                // moderator:manage:banned_users are the write scopes for hands-free broadcaster actions
+                // (Phase 1c) — the second and final re-auth milestone; see twitchActionScopes.
+                let scopes = "channel:manage:broadcast channel:read:stream_key user:write:chat user:read:chat moderator:read:followers channel:read:subscriptions bits:read clips:edit channel:read:ads channel:manage:ads channel:edit:commercial moderator:manage:chat_settings moderator:manage:announcements channel:manage:raids moderator:manage:chat_messages moderator:manage:banned_users"
                 let dev = try await Self.form("https://id.twitch.tv/oauth2/device", ["client_id": Self.twitchID, "scopes": scopes])
                 guard let deviceCode = dev["device_code"] as? String else { throw Self.err("no device_code: \(dev)") }
                 twitchUserCode = dev["user_code"] as? String ?? ""
@@ -276,6 +294,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
             if let k = ((try await helix("GET", "/streams/key", query: bid))["data"] as? [[String: Any]])?.first {
                 twitchStreamKey = k["stream_key"] as? String ?? ""
             }
+            if twitchHasScopes(["channel:read:ads"]) { await twitchRefreshAdSchedule() }
             status = "Twitch updated"
         } catch { status = error.localizedDescription }
     }
@@ -325,6 +344,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     func disconnectTwitch() {
         forget("twitch"); twitchUser = ""; twitchTitle = ""; twitchCategory = nil; twitchStreamKey = ""
         twitchTags = []; twitchLabels = []; twitchDelay = 0; twitchLanguage = ""; twitchScopes = []
+        twitchAdNextAt = nil; twitchAdSnoozeCount = 0
     }
 
     /// True when every scope in `required` was granted at the last Twitch auth. Adding a scope never upgrades
@@ -332,14 +352,32 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     /// instead of discovering it's missing as a 401.
     func twitchHasScopes(_ required: Set<String>) -> Bool { required.isSubset(of: twitchScopes) }
 
-    /// Feature names (keys of `twitchChatScopes`) whose scope is missing from the currently granted set —
-    /// empty once the user reconnects. For the UI to render a "Reconnect Twitch" prompt naming just the
-    /// affected features; nothing here disconnects the user or triggers re-auth on its own. Device-code
-    /// login has a fixed 15-minute ceiling and needs the user present, so it's the UI's call when to ask,
-    /// never automatic at launch or mid-stream.
-    var twitchMissingScopeFeatures: [String] {
-        Self.twitchChatScopes.filter { !twitchHasScopes($0.value) }.map(\.key).sorted()
+    /// Feature names (keys of `twitchChatScopes` + `twitchActionScopes`) whose scope is missing from the
+    /// currently granted set — empty once the user reconnects. For the UI to render a "Reconnect Twitch"
+    /// prompt naming just the affected features; nothing here disconnects the user or triggers re-auth on
+    /// its own. Device-code login has a fixed 15-minute ceiling and needs the user present, so it's the
+    /// UI's call when to ask, never automatic at launch or mid-stream.
+    var twitchMissingScopeFeatures: [String] { Self.missingScopeFeatures(granted: twitchScopes) }
+
+    /// Pure version of the above (no `self`), so the scope-gap logic can be exercised without a live
+    /// `Platforms` instance — see `demo()`.
+    static func missingScopeFeatures(granted: Set<String>) -> [String] {
+        twitchChatScopes.merging(twitchActionScopes) { a, _ in a }
+            .filter { !$0.value.isSubset(of: granted) }.map(\.key).sorted()
     }
+
+    #if DEBUG
+    /// Self-check for the scope-gap logic: given a granted scope set, the right feature names come back
+    /// as missing. This is the logic a user actually feels when a button is greyed out.
+    static func demo() {
+        let granted: Set<String> = ["channel:manage:broadcast", "user:read:chat", "clips:edit", "channel:read:ads", "channel:manage:ads"]
+        let missing = missingScopeFeatures(granted: granted)
+        let want = ["announcements", "chat lockdown", "cheers", "commercial", "follows", "moderation", "raids", "subscriptions"]
+        assert(missing == want, "twitch scope-gap mismatch: got \(missing), want \(want)")
+        assert(missingScopeFeatures(granted: []).count == twitchChatScopes.count + twitchActionScopes.count, "empty grant should miss every feature")
+        applog("api", "Platforms.demo: scope-gap check ok")
+    }
+    #endif
 
     // MARK: - Twitch EventSub (chat feed)
 
@@ -371,6 +409,142 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
             }
         }
     }
+
+    // MARK: - Twitch hands-free actions (Phase 1c)
+    // One decisive tap each — nothing here needs sustained screen attention. Endpoints/scopes verified
+    // against dev.twitch.tv/docs/api/reference and dev.twitch.tv/docs/authentication/scopes as of writing.
+
+    /// POST helix/clips, scope clips:edit. Twitch creates the clip asynchronously — the id/url come back
+    /// immediately but the clip itself can take a few seconds to finish processing on Twitch's side.
+    /// Returns id+url on success so any caller (this view, or the live-screen button ContentView adds)
+    /// can report success/failure without reaching into `status`.
+    struct TwitchClip { let id: String; let url: String }
+    func twitchCreateClip() async throws -> TwitchClip {
+        guard !twitchUserID.isEmpty else { throw Self.err("twitch: not connected") }
+        let r = try await helix("POST", "/clips", query: [.init(name: "broadcaster_id", value: twitchUserID)])
+        guard let c = (r["data"] as? [[String: Any]])?.first, let id = c["id"] as? String else { throw Self.err("twitch: clip create returned no id") }
+        return TwitchClip(id: id, url: "https://clips.twitch.tv/\(id)")
+    }
+
+    /// POST helix/streams/markers — body key is `user_id`, not `broadcaster_id` (Twitch's own inconsistency).
+    /// Scope channel:manage:broadcast, already requested since Phase 1a, so this needs no new grant.
+    func twitchCreateMarker(description: String = "") async throws {
+        guard !twitchUserID.isEmpty else { throw Self.err("twitch: not connected") }
+        var body: [String: Any] = ["user_id": twitchUserID]
+        if !description.isEmpty { body["description"] = String(description.prefix(140)) }   // Twitch's own cap
+        _ = try await helix("POST", "/streams/markers", body: body)
+    }
+
+    /// GET helix/channels/ads, scope channel:read:ads (distinct from channel:manage:ads on the snooze call
+    /// below). `next_ad_at` is "" when there's nothing scheduled. Called from refreshTwitch when the scope
+    /// is present; failures are logged, not surfaced to `status` — a quiet countdown beats spamming errors.
+    func twitchRefreshAdSchedule() async {
+        do {
+            guard let a = ((try await helix("GET", "/channels/ads", query: [.init(name: "broadcaster_id", value: twitchUserID)]))["data"] as? [[String: Any]])?.first else { return }
+            twitchAdSnoozeCount = a["snooze_count"] as? Int ?? 0
+            if let s = a["next_ad_at"] as? String, !s.isEmpty { twitchAdNextAt = ISO8601DateFormatter().date(from: s) } else { twitchAdNextAt = nil }
+        } catch { applog("api", "twitch ad schedule: \(error.localizedDescription)", error: true) }
+    }
+
+    /// POST helix/channels/ads/schedule/snooze, scope channel:manage:ads.
+    func twitchSnoozeAd() async {
+        do {
+            _ = try await helix("POST", "/channels/ads/schedule/snooze", query: [.init(name: "broadcaster_id", value: twitchUserID)])
+            status = "Ad snoozed"; await twitchRefreshAdSchedule()
+        } catch { status = error.localizedDescription }
+    }
+
+    /// POST helix/channels/commercial, scope channel:edit:commercial. Twitch only accepts 30/60/90/120/150/180s.
+    /// ponytail: fixed 90s, no length picker — that needs the screen. Add one if a different default matters.
+    func twitchStartCommercial(seconds: Int = 90) async {
+        guard !twitchUserID.isEmpty else { return }
+        do {
+            _ = try await helix("POST", "/channels/commercial", body: ["broadcaster_id": twitchUserID, "length": seconds])
+            status = "Commercial started"
+        } catch { status = error.localizedDescription }
+    }
+
+    /// PATCH helix/chat/settings, scope moderator:manage:chat_settings. `moderator_id` = the broadcaster
+    /// themself, same self-as-moderator pattern as twitchSend's sender_id. ponytail: fixed 10-min
+    /// follower gate / 10s slow mode, no duration tuning UI — that needs the screen mid-raid, not a tap.
+    func twitchLockdownChat(on: Bool) async {
+        guard !twitchUserID.isEmpty else { return }
+        let body: [String: Any] = on
+            ? ["follower_mode": true, "follower_mode_duration_minutes": 10, "slow_mode": true, "slow_mode_wait_seconds": 10]
+            : ["follower_mode": false, "slow_mode": false]
+        do {
+            _ = try await helix("PATCH", "/chat/settings", query: modQuery, body: body)
+            status = on ? "Chat locked down" : "Chat lockdown lifted"
+        } catch { status = error.localizedDescription }
+    }
+
+    /// POST helix/chat/announcements, scope moderator:manage:announcements. ponytail: always default
+    /// ("primary") color — a color picker is a screen-attention feature this app doesn't need.
+    func twitchAnnounce(_ message: String) async {
+        let m = message.trimmingCharacters(in: .whitespaces)
+        guard !twitchUserID.isEmpty, !m.isEmpty else { return }
+        do {
+            _ = try await helix("POST", "/chat/announcements", query: modQuery, body: ["message": m])
+            status = "Announcement sent"
+        } catch { status = error.localizedDescription }
+    }
+
+    /// POST helix/raids, scope channel:manage:raids. Takes a login name (what a user would type/say),
+    /// resolves it to an id via GET /users first.
+    func twitchRaid(_ targetLogin: String) async {
+        let login = targetLogin.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !twitchUserID.isEmpty, !login.isEmpty else { return }
+        do {
+            guard let toID = ((try await helix("GET", "/users", query: [.init(name: "login", value: login)]))["data"] as? [[String: Any]])?.first?["id"] as? String else {
+                status = "Twitch: no user named \(login)"; return
+            }
+            _ = try await helix("POST", "/raids", query: [.init(name: "from_broadcaster_id", value: twitchUserID), .init(name: "to_broadcaster_id", value: toID)])
+            status = "Raiding \(login)"
+        } catch { status = error.localizedDescription }
+    }
+
+    /// DELETE helix/raids, scope channel:manage:raids.
+    func twitchCancelRaid() async {
+        do { _ = try await helix("DELETE", "/raids", query: [.init(name: "broadcaster_id", value: twitchUserID)]); status = "Raid cancelled" }
+        catch { status = error.localizedDescription }
+    }
+
+    // Moderation: exposed as throwing methods, not the status-string pattern above, so a future per-row
+    // caller (chat feed rows) can report success/failure on that one row instead of a global banner.
+
+    /// DELETE helix/moderation/chat, scope moderator:manage:chat_messages. nil messageID clears the whole chat.
+    func twitchDeleteMessage(_ messageID: String?) async throws {
+        guard !twitchUserID.isEmpty else { throw Self.err("twitch: not connected") }
+        var q = modQuery
+        if let messageID { q.append(.init(name: "message_id", value: messageID)) }
+        _ = try await helix("DELETE", "/moderation/chat", query: q)
+    }
+
+    /// POST helix/moderation/bans, scope moderator:manage:banned_users. Body is wrapped in a top-level
+    /// `data` object — the one Helix moderation endpoint that does this. `duration` in seconds times out
+    /// instead of banning (Twitch caps it at 1209600s / 14 days); omit for a permanent ban.
+    func twitchBan(userID: String, duration: Int? = nil, reason: String = "") async throws {
+        guard !twitchUserID.isEmpty else { throw Self.err("twitch: not connected") }
+        var data: [String: Any] = ["user_id": userID]
+        if let duration { data["duration"] = duration }
+        if !reason.isEmpty { data["reason"] = reason }
+        _ = try await helix("POST", "/moderation/bans", query: modQuery, body: ["data": data])
+    }
+
+    /// Timeout is just a bounded ban — same endpoint, `duration` set.
+    func twitchTimeout(userID: String, seconds: Int, reason: String = "") async throws {
+        try await twitchBan(userID: userID, duration: seconds, reason: reason)
+    }
+
+    /// DELETE helix/moderation/bans, scope moderator:manage:banned_users.
+    func twitchUnban(userID: String) async throws {
+        guard !twitchUserID.isEmpty else { throw Self.err("twitch: not connected") }
+        _ = try await helix("DELETE", "/moderation/bans", query: modQuery + [.init(name: "user_id", value: userID)])
+    }
+
+    /// `broadcaster_id` + `moderator_id` query pair every moderator-scoped Helix call below needs; the
+    /// broadcaster is always allowed to moderate their own channel, so moderator_id = twitchUserID.
+    private var modQuery: [URLQueryItem] { [.init(name: "broadcaster_id", value: twitchUserID), .init(name: "moderator_id", value: twitchUserID)] }
 
     // MARK: - Restream (OAuth 2 code flow, Basic-auth token exchange, no PKCE offered)
 

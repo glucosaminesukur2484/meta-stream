@@ -19,6 +19,9 @@ struct StreamManagerView: View {
     @State private var results: [StreamCategory] = []
     @State private var chatText = ""
     @State private var busy = false
+    // Twitch hands-free actions
+    @State private var announceText = ""
+    @State private var raidTarget = ""
 
     // Kick + Twitch
     @State private var tags = ""              // comma-separated
@@ -68,6 +71,7 @@ struct StreamManagerView: View {
                     connectSection
                 } else {
                     headerSection
+                    if tab == "twitch" { twitchActionsSection }
                     infoSection
                     if tab == "restream" { restreamDestinationsSection }
                     keySection
@@ -129,6 +133,77 @@ struct StreamManagerView: View {
                 if tab == "restream" { Text("\(platforms.restreamDestinations.filter(\.active).count)/\(platforms.restreamDestinations.count) destinations").foregroundStyle(.secondary) }
                 else { Text(isLive ? "\(viewers) viewers" : "offline").foregroundStyle(.secondary) }
                 Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// Hands-free Twitch actions: one decisive tap each, no screen reading required to use them (the glasses
+    /// use case this app exists for). Each control disables itself with a reason when its write scope hasn't
+    /// been granted yet, instead of failing at tap time with a 401 — see Platforms.twitchActionScopes.
+    private var twitchActionsSection: some View {
+        Section {
+            HStack(spacing: 12) {
+                Button {
+                    Task {
+                        do { let c = try await platforms.twitchCreateClip(); platforms.status = "Clip created: \(c.url)" }
+                        catch { platforms.status = error.localizedDescription }
+                    }
+                } label: {
+                    VStack(spacing: 4) { Image(systemName: "scissors").font(.title2); Text("Clip").bold() }.frame(maxWidth: .infinity)
+                }
+                .disabled(!platforms.twitchHasScopes(Platforms.twitchActionScopes["clips"]!))
+
+                Button {
+                    Task {
+                        do { try await platforms.twitchCreateMarker(); platforms.status = "Marker set" }
+                        catch { platforms.status = error.localizedDescription }
+                    }
+                } label: {
+                    VStack(spacing: 4) { Image(systemName: "bookmark.fill").font(.title2); Text("Marker").bold() }.frame(maxWidth: .infinity)
+                }
+                .disabled(!platforms.twitchHasScopes(["channel:manage:broadcast"]))
+            }
+            .buttonStyle(.borderedProminent).controlSize(.large)
+            .listRowInsets(EdgeInsets()).padding(.vertical, 4)
+
+            HStack {
+                Text("Next ad").foregroundStyle(.secondary)
+                Spacer()
+                if let next = platforms.twitchAdNextAt { Text(next, style: .relative) } else { Text("unknown") }
+            }
+            Button("Snooze ad (\(platforms.twitchAdSnoozeCount) left)") { Task { await platforms.twitchSnoozeAd() } }
+                .disabled(!platforms.twitchHasScopes(Platforms.twitchActionScopes["ads"]!) || platforms.twitchAdSnoozeCount == 0)
+
+            Button("Start 90s commercial") { Task { await platforms.twitchStartCommercial() } }
+                .disabled(!platforms.twitchHasScopes(Platforms.twitchActionScopes["commercial"]!))
+
+            HStack {
+                Text("Chat lockdown").foregroundStyle(.secondary)
+                Spacer()
+                Button("Lock") { Task { await platforms.twitchLockdownChat(on: true) } }
+                Button("Unlock") { Task { await platforms.twitchLockdownChat(on: false) } }
+            }
+            .disabled(!platforms.twitchHasScopes(Platforms.twitchActionScopes["chat lockdown"]!))
+
+            HStack {
+                TextField("Announcement", text: $announceText)
+                Button("Send") { let t = announceText; announceText = ""; Task { await platforms.twitchAnnounce(t) } }
+                    .disabled(announceText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .disabled(!platforms.twitchHasScopes(Platforms.twitchActionScopes["announcements"]!))
+
+            HStack {
+                TextField("Raid channel", text: $raidTarget).textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("Raid") { let t = raidTarget; raidTarget = ""; Task { await platforms.twitchRaid(t) } }
+                    .disabled(raidTarget.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .disabled(!platforms.twitchHasScopes(Platforms.twitchActionScopes["raids"]!))
+        } header: { Text("Quick actions") } footer: {
+            if !platforms.twitchMissingScopeFeatures.isEmpty {
+                Text("Disconnect and reconnect Twitch below to enable \(platforms.twitchMissingScopeFeatures.joined(separator: ", ")).")
+                    .foregroundStyle(.orange)
+            } else {
+                Text("Moderation (delete/timeout/ban) is available from chat message rows.")
             }
         }
     }
