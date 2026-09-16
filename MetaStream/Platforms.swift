@@ -21,6 +21,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     @Published var kickViewers = 0
     @Published var kickStreamURL = ""
     @Published var kickStreamKey = ""
+    @Published var kickTags: [String] = []    // custom_tags; no confirmed read-back field, so this only tracks what we last sent
     private var kickUserID = 0
 
     // Twitch
@@ -32,7 +33,13 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     @Published var twitchStreamKey = ""
     @Published var twitchUserCode = ""        // shown while the device-code login is pending
     @Published var twitchVerifyURL = ""
+    @Published var twitchTags: [String] = []
+    @Published var twitchLabels: Set<String> = []     // enabled content_classification_labels
+    @Published var twitchDelay = 0                    // seconds; Partner-only stream delay
+    @Published var twitchLanguage = ""
     private var twitchUserID = ""
+    // https://dev.twitch.tv/docs/api/reference/#get-content-classification-labels — the current valid CCL ids.
+    static let twitchLabelIDs = ["DebatedSocialIssuesAndPolitics", "DrugsIntoxication", "SexualThemes", "ViolentGraphic", "Gambling", "ProfanityVulgarity"]
 
     // Restream
     @Published var restreamUser = ""
@@ -44,6 +51,9 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     // YouTube
     @Published var ytUser = ""
     @Published var ytTitle = ""
+    @Published var ytDescription = ""
+    @Published var ytPrivacy = "public"       // public / unlisted / private
+    @Published var ytLatency = "normal"       // normal / low / ultraLow
     @Published var ytLive = false
     @Published var ytViewers = 0
     @Published var ytVideoID = ""
@@ -169,11 +179,16 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         }
     }
 
-    func kickApply(title: String, category: StreamCategory?) async {
+    func kickApply(title: String, category: StreamCategory?, tags: [String] = []) async {
         var body: [String: Any] = ["stream_title": title]
         if let category, let id = Int(category.id) { body["category_id"] = id }
-        do { _ = try await kick("PATCH", "/public/v1/channels", body: body); status = "Kick title updated"; await refreshKick() }
-        catch { status = error.localizedDescription }
+        let cleanTags = Array(tags.prefix(10))                          // Kick caps custom_tags at 10
+        if cleanTags != kickTags { body["custom_tags"] = cleanTags }    // omit when unchanged: an empty/unloaded field must not wipe real tags
+        do {
+            _ = try await kick("PATCH", "/public/v1/channels", body: body)
+            if body["custom_tags"] != nil { kickTags = cleanTags }
+            status = "Kick title updated"; await refreshKick()
+        } catch { status = error.localizedDescription }
     }
 
     func kickSend(_ text: String) async {
@@ -181,7 +196,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         catch { status = error.localizedDescription }
     }
 
-    func disconnectKick() { forget("kick"); kickUser = ""; kickTitle = ""; kickCategory = nil; kickStreamKey = "" }
+    func disconnectKick() { forget("kick"); kickUser = ""; kickTitle = ""; kickCategory = nil; kickStreamKey = ""; kickTags = [] }
 
     // MARK: - Twitch (Device Code Grant, public client, no secret)
 
@@ -236,6 +251,10 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
                 if let gid = ch["game_id"] as? String, !gid.isEmpty {
                     twitchCategory = StreamCategory(id: gid, name: ch["game_name"] as? String ?? "")
                 }
+                twitchTags = ch["tags"] as? [String] ?? []
+                twitchLabels = Set(ch["content_classification_labels"] as? [String] ?? [])
+                twitchDelay = ch["delay"] as? Int ?? 0
+                twitchLanguage = ch["broadcaster_language"] as? String ?? ""
             }
             let live = ((try await helix("GET", "/streams", query: [.init(name: "user_id", value: twitchUserID)]))["data"] as? [[String: Any]])?.first
             twitchLive = live != nil
@@ -256,12 +275,31 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         }
     }
 
-    func twitchApply(title: String, category: StreamCategory?) async {
+    /// `tags`/`labels`/`delay`/`language` are all "omit when unchanged" against the last-loaded values, so an
+    /// untouched (or not-yet-loaded) field can never silently wipe what's already on the channel.
+    func twitchApply(title: String, category: StreamCategory?, tags: [String] = [], labels: [String: Bool] = [:], delay: Int = 0, language: String = "") async {
         var body: [String: Any] = ["title": title]
         if let category { body["game_id"] = category.id }
+
+        // ponytail: drop invalid tags instead of 400ing — no spaces, ≤25 chars, ≤10 tags (Twitch's own limits).
+        let cleanTags = Array(tags.map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.contains(" ") && $0.count <= 25 }.prefix(10))
+        if cleanTags != twitchTags { body["tags"] = cleanTags }
+
+        let currentLabels = twitchLabels.intersection(Self.twitchLabelIDs)
+        let newLabels = Set(labels.filter(\.value).keys)
+        if newLabels != currentLabels {
+            body["content_classification_labels"] = Self.twitchLabelIDs.map { ["id": $0, "is_enabled": newLabels.contains($0)] }
+        }
+
+        if delay != twitchDelay { body["delay"] = delay }   // Partner-only anti-stream-sniping delay; Twitch ignores/errors it for everyone else
+
+        let lang = language.trimmingCharacters(in: .whitespaces)
+        if !lang.isEmpty, lang != twitchLanguage { body["broadcaster_language"] = lang }
+
         do {
             _ = try await helix("PATCH", "/channels", query: [.init(name: "broadcaster_id", value: twitchUserID)], body: body)
-            status = "Twitch title updated"; await refreshTwitch()
+            status = "Twitch channel updated"; await refreshTwitch()
         } catch { status = error.localizedDescription }
     }
 
@@ -270,7 +308,10 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         catch { status = error.localizedDescription }
     }
 
-    func disconnectTwitch() { forget("twitch"); twitchUser = ""; twitchTitle = ""; twitchCategory = nil; twitchStreamKey = "" }
+    func disconnectTwitch() {
+        forget("twitch"); twitchUser = ""; twitchTitle = ""; twitchCategory = nil; twitchStreamKey = ""
+        twitchTags = []; twitchLabels = []; twitchDelay = 0; twitchLanguage = ""
+    }
 
     // MARK: - Restream (OAuth 2 code flow, Basic-auth token exchange, no PKCE offered)
 
@@ -400,7 +441,10 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
                 ytVideoID = b["id"] as? String ?? ""
                 let sn = b["snippet"] as? [String: Any] ?? [:]
                 ytTitle = sn["title"] as? String ?? ""
+                ytDescription = sn["description"] as? String ?? ""
                 ytLiveChatID = sn["liveChatId"] as? String ?? ""
+                ytPrivacy = (b["status"] as? [String: Any])?["privacyStatus"] as? String ?? "public"
+                ytLatency = (b["contentDetails"] as? [String: Any])?["latencyPreference"] as? String ?? "normal"
                 ytLive = ((b["status"] as? [String: Any])?["lifeCycleStatus"] as? String) == "live"
                 if let v = ((try await yt("GET", "/videos", query: [.init(name: "part", value: "liveStreamingDetails"), .init(name: "id", value: ytVideoID)]))["items"] as? [[String: Any]])?.first {
                     ytViewers = Int((v["liveStreamingDetails"] as? [String: Any])?["concurrentViewers"] as? String ?? "") ?? 0
@@ -415,14 +459,24 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         } catch { status = error.localizedDescription }
     }
 
-    func ytApply(title: String) async {
-        guard !ytVideoID.isEmpty, var sn = ytBroadcast["snippet"] as? [String: Any] else { status = "No YouTube broadcast found. Create one in YouTube Studio first."; return }
-        sn["title"] = title
-        var body: [String: Any] = ["id": ytVideoID, "snippet": ["title": title, "scheduledStartTime": sn["scheduledStartTime"] ?? "", "description": sn["description"] ?? ""]]
-        if let cd = ytBroadcast["contentDetails"] { body["contentDetails"] = cd }   // PUT deletes what you omit
+    /// `liveBroadcasts.update` REPLACES every field in each part you send — so every part below is rebuilt from
+    /// the last full fetch (`ytBroadcast`, read with part=id,snippet,contentDetails,status in refreshYouTube) with
+    /// only the intended field changed, never sent as a bare `{"title": …}`. Otherwise this would silently wipe
+    /// the description, scheduledStartTime, and the rest of contentDetails/status.
+    func ytApply(title: String, description: String, privacy: String, latency: String) async {
+        guard !ytVideoID.isEmpty, let sn = ytBroadcast["snippet"] as? [String: Any] else { status = "No YouTube broadcast found. Create one in YouTube Studio first."; return }
+        var st = ytBroadcast["status"] as? [String: Any] ?? [:]
+        st["privacyStatus"] = privacy
+        var cd = ytBroadcast["contentDetails"] as? [String: Any] ?? [:]
+        cd["latencyPreference"] = latency
+        let body: [String: Any] = [
+            "id": ytVideoID,
+            "snippet": ["title": title, "description": description, "scheduledStartTime": sn["scheduledStartTime"] ?? ""],
+            "status": st, "contentDetails": cd,
+        ]
         do {
-            _ = try await yt("PUT", "/liveBroadcasts", query: [.init(name: "part", value: "snippet,contentDetails")], body: body)
-            status = "YouTube title updated"; await refreshYouTube()
+            _ = try await yt("PUT", "/liveBroadcasts", query: [.init(name: "part", value: "snippet,status,contentDetails")], body: body)
+            status = "YouTube updated"; await refreshYouTube()
         } catch { status = error.localizedDescription }
     }
 
@@ -434,7 +488,10 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         } catch { status = error.localizedDescription }
     }
 
-    func disconnectYouTube() { forget("yt"); ytUser = ""; ytTitle = ""; ytVideoID = ""; ytStreamKey = "" }
+    func disconnectYouTube() {
+        forget("yt"); ytUser = ""; ytTitle = ""; ytVideoID = ""; ytStreamKey = ""
+        ytDescription = ""; ytPrivacy = "public"; ytLatency = "normal"
+    }
 
     // MARK: - plumbing
 

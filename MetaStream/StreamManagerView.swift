@@ -20,6 +20,17 @@ struct StreamManagerView: View {
     @State private var chatText = ""
     @State private var busy = false
 
+    // Kick + Twitch
+    @State private var tags = ""              // comma-separated
+    // Twitch only
+    @State private var labels: [String: Bool] = [:]
+    @State private var delay = 0
+    @State private var language = ""
+    // YouTube only
+    @State private var description = ""
+    @State private var privacy = "public"
+    @State private var latency = "normal"
+
     private var name: String { ["kick": "Kick", "twitch": "Twitch", "restream": "Restream", "youtube": "YouTube"][tab] ?? tab }
     private var connected: Bool {
         switch tab { case "kick": platforms.kickConnected; case "twitch": platforms.twitchConnected
@@ -123,7 +134,7 @@ struct StreamManagerView: View {
     }
 
     private var infoSection: some View {
-        Section("Stream info") {
+        Section {
             TextField("Title", text: $title, axis: .vertical).lineLimit(1...3)
             if hasCategory {
                 HStack { Text("Category").foregroundStyle(.secondary); Spacer(); Text(category?.name ?? "—").lineLimit(1) }
@@ -138,21 +149,57 @@ struct StreamManagerView: View {
                     }
                 }
             }
+            if tab == "kick" || tab == "twitch" {
+                TextField("Tags, comma separated", text: $tags)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+            }
+            if tab == "twitch" {
+                TextField("Language (e.g. en)", text: $language)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                Stepper("Stream delay: \(delay)s", value: $delay, in: 0...900, step: 15)
+                ForEach(Platforms.twitchLabelIDs, id: \.self) { id in
+                    Toggle(Self.labelName(id), isOn: Binding(get: { labels[id] ?? false }, set: { labels[id] = $0 }))
+                }
+            }
+            if tab == "youtube" {
+                TextField("Description", text: $description, axis: .vertical).lineLimit(1...4)
+                Picker("Privacy", selection: $privacy) {
+                    Text("Public").tag("public"); Text("Unlisted").tag("unlisted"); Text("Private").tag("private")
+                }
+                Picker("Latency", selection: $latency) {
+                    Text("Normal").tag("normal"); Text("Low").tag("low"); Text("Ultra-low").tag("ultraLow")
+                }
+            }
             Button {
                 busy = true
+                let cleanTags = tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
                 Task {
                     switch tab {
-                    case "kick": await platforms.kickApply(title: title, category: category)
-                    case "twitch": await platforms.twitchApply(title: title, category: category)
+                    case "kick": await platforms.kickApply(title: title, category: category, tags: cleanTags)
+                    case "twitch": await platforms.twitchApply(title: title, category: category, tags: cleanTags, labels: labels, delay: delay, language: language)
                     case "restream": await platforms.restreamApply(title: title)
-                    default: await platforms.ytApply(title: title)
+                    default: await platforms.ytApply(title: title, description: description, privacy: privacy, latency: latency)
                     }
                     busy = false
                 }
             } label: {
-                HStack { Spacer(); if busy { ProgressView() } else { Text(hasCategory ? "Apply title & category" : tab == "restream" ? "Apply title to all destinations" : "Apply title").bold() }; Spacer() }
+                HStack { Spacer(); if busy { ProgressView() } else { Text(tab == "restream" ? "Apply title to all destinations" : "Apply changes").bold() }; Spacer() }
             }
             .buttonStyle(.borderedProminent).disabled(busy || title.isEmpty)
+        } header: { Text("Stream info") } footer: {
+            if tab == "twitch" { Text("Stream delay is Partner-only — Twitch ignores or errors it otherwise. It's the anti-stream-sniping delay, worth it for IRL.") }
+        }
+    }
+
+    private static func labelName(_ id: String) -> String {
+        switch id {
+        case "DebatedSocialIssuesAndPolitics": return "Debated social issues & politics"
+        case "DrugsIntoxication": return "Drugs, intoxication"
+        case "SexualThemes": return "Sexual themes"
+        case "ViolentGraphic": return "Violent & graphic"
+        case "Gambling": return "Gambling"
+        case "ProfanityVulgarity": return "Profanity & vulgarity"
+        default: return id
         }
     }
 
@@ -205,10 +252,20 @@ struct StreamManagerView: View {
 
     private func loadFields() {
         switch tab {
-        case "kick": title = platforms.kickTitle; category = platforms.kickCategory
-        case "twitch": title = platforms.twitchTitle; category = platforms.twitchCategory
-        case "restream": title = platforms.restreamTitle; category = nil
-        default: title = platforms.ytTitle; category = nil
+        case "kick":
+            title = platforms.kickTitle; category = platforms.kickCategory
+            tags = platforms.kickTags.joined(separator: ", ")
+        case "twitch":
+            title = platforms.twitchTitle; category = platforms.twitchCategory
+            tags = platforms.twitchTags.joined(separator: ", ")
+            labels = Dictionary(uniqueKeysWithValues: Platforms.twitchLabelIDs.map { ($0, platforms.twitchLabels.contains($0)) })
+            delay = platforms.twitchDelay
+            language = platforms.twitchLanguage
+        case "restream":
+            title = platforms.restreamTitle; category = nil
+        default:
+            title = platforms.ytTitle; category = nil
+            description = platforms.ytDescription; privacy = platforms.ytPrivacy; latency = platforms.ytLatency
         }
         results = []; search = ""
     }
