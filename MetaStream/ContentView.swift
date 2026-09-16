@@ -165,6 +165,9 @@ struct ContentView: View {
                              down ? .orange : .red)
                     }
                     pill("waveform", "\(streamer.fps) fps · \(streamer.kbps) kbps", .white)
+                    if streamer.currentBitrateKbps > 0, streamer.currentBitrateKbps < bitrateKbps {
+                        pill("arrow.down.right.circle", "\(streamer.currentBitrateKbps)k cap", .orange)
+                    }
                 } else {
                     pill("antenna.radiowaves.left.and.right", streamer.rtmpState, .gray)
                 }
