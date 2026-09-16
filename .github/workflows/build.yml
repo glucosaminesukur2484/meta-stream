@@ -51,13 +51,13 @@ jobs:
           echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Installed profile '$NAME' ($UUID)"
 
-      - name: Self-checks
+      # The demo() self-checks are `#if DEBUG`, and the archive below is Release, so without this
+      # step they are never even compiled. This builds Debug for device so they are type-checked
+      # every run and cannot silently rot. It does NOT execute the asserts: the app traps on
+      # launch in a simulator (the Meta SDK), so a hosted test target was not worth the chase.
+      - name: Compile the DEBUG self-checks
         run: |
-          # Pick whatever iPhone simulator the runner actually has; hardcoding a name drifts
-          # every time the Xcode image moves.
-          UDID=$(xcrun simctl list devices available -j | /usr/bin/python3 -c             "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k in d for x in d[k] if 'iPhone' in x['name']))")
-          echo "Using simulator $UDID"
-          xcodebuild test             -project MetaStream.xcodeproj             -scheme MetaStream             -destination "id=$UDID"             -skipPackagePluginValidation -skipMacroValidation             CODE_SIGNING_ALLOWED=NO
+          xcodebuild build             -project MetaStream.xcodeproj             -scheme MetaStream             -configuration Debug             -destination 'generic/platform=iOS'             -skipPackagePluginValidation -skipMacroValidation             CODE_SIGNING_ALLOWED=NO
 
       - name: Archive (signed)
         run: |

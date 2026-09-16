@@ -39,9 +39,6 @@ targets:
         YOUTUBE_CLIENT_ID: ""
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_ENTITLEMENTS: MetaStream/MetaStream.entitlements   # Wi-Fi entitlements the Meta SDK needs for video
-    scheme:
-      testTargets:
-        - MetaStreamTests
     dependencies:
       - package: MetaWearablesDAT
         product: MWDATCore
@@ -54,14 +51,3 @@ targets:
       - package: HaishinKit
         product: SRTHaishinKit
 
-  MetaStreamTests:
-    type: bundle.unit-test
-    platform: iOS
-    sources: [Tests]
-    settings:
-      base:
-        SWIFT_VERSION: "6.0"
-        SWIFT_STRICT_CONCURRENCY: minimal
-        GENERATE_INFOPLIST_FILE: YES
-    dependencies:
-      - target: MetaStream
