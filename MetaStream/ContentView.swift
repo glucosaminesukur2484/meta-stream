@@ -47,6 +47,7 @@ struct ContentView: View {
     @EnvironmentObject var speaker: Speaker
     @EnvironmentObject var chat: ChatFeed
     @EnvironmentObject var platforms: Platforms
+    @EnvironmentObject var privacy: Privacy
     @AppStorage("rtmpURL") var ingestURL = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     // ponytail: stream key in UserDefaults; move to Keychain if the phone is shared.
     @AppStorage("streamKey") var streamKey = ""
@@ -56,6 +57,10 @@ struct ContentView: View {
     @AppStorage("voiceKick") var voiceKick = true
     @AppStorage("voiceTwitch") var voiceTwitch = true
     @AppStorage("voiceYouTube") var voiceYouTube = true
+    @AppStorage("blurOn") var blurOn = false
+    @AppStorage("blurFaces") var blurFaces = true
+    @AppStorage("blurText") var blurText = true
+    @AppStorage("blurBarcodes") var blurBarcodes = true
     @AppStorage("chatChannel") var chatChannel = ""
     @AppStorage("resolution") var resolution = "high"
     @AppStorage("fps") var fpsSetting = 30
@@ -72,6 +77,10 @@ struct ContentView: View {
     /// auto: only YouTube (enhanced RTMP) and custom servers take the glasses' HEVC untouched. Kick, Restream,
     /// Instagram and TikTok are H.264-only ingests, and Twitch gates HEVC behind Affiliate, so they get a transcode.
     private var codec: String {
+        // adr/0001: blur has to decode every frame to obscure it, so it forces a transcode and
+        // outranks even an explicit HEVC choice — you cannot blur a frame you never decode.
+        // Precedence: blur > explicit codec > protocol capability > destination table.
+        if blurOn { return "h264" }
         guard codecPref == "auto" else { return codecPref }
         // SRT carries whatever the server decodes, and passthrough is the entire reason to use it:
         // no transcode means no PiP window needed to keep streaming in the background.
@@ -150,7 +159,11 @@ struct ContentView: View {
             // so nothing here needs backpressure handling.
             for await e in chat.events { speaker.speak(e) }
         }
-        .onAppear { startChat() }
+        .onAppear { startChat(); applyBlur() }
+        .onChange(of: blurOn) { _, _ in applyBlur() }
+        .onChange(of: blurFaces) { _, _ in applyBlur() }
+        .onChange(of: blurText) { _, _ in applyBlur() }
+        .onChange(of: blurBarcodes) { _, _ in applyBlur() }
         .onChange(of: chatChannel) { _, _ in startChat() }
         .onChange(of: voiceKick) { _, _ in startChat() }
         .onChange(of: voiceTwitch) { _, _ in startChat() }
@@ -197,6 +210,10 @@ struct ContentView: View {
                 if let gt = streamer.glassesThermal, let heat = glassesHeat(gt) {
                     pill("thermometer", "glasses \(heat)", heat == "warm" ? .white : .orange)
                 }
+                if blurOn {
+                    pill(privacy.stalled ? "eye.trianglebadge.exclamationmark" : "eye.slash.fill",
+                         privacy.stalled ? "blur failed" : "blur", privacy.stalled ? .orange : .white)
+                }
                 if streamer.thermal != .nominal {
                     pill("thermometer", thermalLabel, streamer.thermal == .fair ? .white : .orange)
                 }
@@ -226,6 +243,13 @@ struct ContentView: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    /// Privacy exposes plain vars, not @Published — a published hot path would cost a MainActor hop on
+    /// every decoded frame. So settings are written through here instead of bound.
+    private func applyBlur() {
+        privacy.enabled = blurOn
+        privacy.options = .init(faces: blurFaces, text: blurText, barcodes: blurBarcodes)
     }
 
     /// Starts every enabled origin that has what it needs. Kick needs only a slug; Twitch and YouTube
