@@ -326,6 +326,9 @@ final class Streamer: ObservableObject {
     private var phoneQuality = PhoneQuality()
     /// Geometry the current session fixed at goLive, reused as the offscreen blur canvas.
     private var sessionVideoSize = Streamer.glassesSize
+    /// True from the moment goLive() fixes the geometry until stopLive(). `live` is no good here: it
+    /// only flips once the first publish succeeds, long after the blur canvas needs sizing.
+    private var sessionGeometryFixed = false
 
     /// libsrt defaults latency to ~120 ms, tuned for clean links; a phone walking through a city needs
     /// far more buffer. Applied only if the user hasn't set it themselves in the URL.
@@ -797,6 +800,7 @@ final class Streamer: ObservableObject {
         // connect, and is deliberately NOT reset by a reconnect — a session (GO LIVE → END LIVE) survives drops.
         downtime = 0; drops = 0; connectedSince = nil; sessionSummary = nil
         downSince = nil; escalated2m = false; escalated5m = false; backoff = 1; blurHidCamera = false
+        sessionGeometryFixed = false
         warnedPhoneBattery = false; warnedThermal = false; warnedGlassesThermal = false
         startHealthMonitoring()
         reconnectTask?.cancel()
@@ -827,6 +831,7 @@ final class Streamer: ObservableObject {
                 let size = onPhone ? phoneQuality.size : Self.glassesSize
                 let rate = onPhone ? phoneQuality.fps : 30
                 sessionVideoSize = size
+                sessionGeometryFixed = true
                 applog("stream", "encoder \(Int(size.width))x\(Int(size.height)) @\(rate) (\(onPhone ? "phone" : "glasses"))")
                 await uplink.setVideoSettings(VideoCodecSettings(
                     videoSize: size,
@@ -836,6 +841,10 @@ final class Streamer: ObservableObject {
                     expectedFrameRate: Float64(rate)))
                 if h264 {                                 // decoded frames need the mixer → encoder → stream path
                     await wireMixer()
+                    // Force the render loop off before resizing, regardless of whether stopLive()'s own
+                    // teardown Task has finished yet -- goLive() must not trust that timing (see
+                    // setScreenSize's doc). No-op if it's already off (the common case: blur was never on).
+                    await setOffscreenMode(false)
                     await Self.setScreenSize(mixer, to: size)   // offscreen rendering (blur) must output the geometry fixed above
                     var vm = await mixer.videoMixerSettings
                     vm.mainTrack = 0                       // track 0 straight through to the encoder
@@ -922,7 +931,8 @@ final class Streamer: ObservableObject {
     /// exposes `enabled` as a plain var that ContentView sets directly (see ContentView's blur toggle) with
     /// no delegate back to Streamer, so this is polled from the 1s stats tick; goLive()'s h264 setup also
     /// calls it once up front so a session that starts with blur already on doesn't wait a full tick for its
-    /// first frames to be covered.
+    /// first frames to be covered. stopLive() forces the off path unconditionally (see setOffscreenMode)
+    /// so a session that ends with blur on can't leave the render loop running into the next one.
     ///
     /// registerVideoEffect hooks mixer.screen (HaishinKit's offscreen render object, track 0 by default) --
     /// checked HaishinKit 2.1.0 and 2.2.5 source directly: that's the one place phone camera, black frames
@@ -939,29 +949,61 @@ final class Streamer: ObservableObject {
     /// whatever the phone camera is configured to produce, since that is the only thing the mixer renders
     /// before GO LIVE.
     private var blurCanvasSize: CGSize {
-        live ? sessionVideoSize : phoneQuality.size
+        sessionGeometryFixed ? sessionVideoSize : phoneQuality.size
     }
 
+    /// Screen.size reallocates the offscreen pixel-buffer pool (checked Screen.swift 2.1.0/2.2.5 directly --
+    /// the `size` didSet calls CVPixelBufferPoolCreate unconditionally, no lock). The only consumer reading
+    /// that pool is HaishinKit's own offscreen render loop: a Task MediaMixer spawns on this same ScreenActor
+    /// from setVideoRenderingMode(.offscreen) that runs until displayLink.stopRunning() ends its AsyncStream --
+    /// checked both tags directly, that's the ONLY public lever that stops it, and MediaMixer never calls it
+    /// itself. So this must only run once that loop is confirmed stopped, not merely "before blur is next
+    /// turned on". Getting that backwards is the relive crash (vImageCopyBuffer, the offscreen CPU renderer's
+    /// only call site in either tag -- grepped both -- reached from a Task closure, matching the decoded
+    /// report exactly): stopLive() used to leave mode == .offscreen whenever a session ended with blur on,
+    /// so the next goLive() resized Screen.size while that session's render loop Task was still alive on this
+    /// same actor. Callers rely on actor FIFO ordering: awaiting setOffscreenMode(false) first enqueues the
+    /// stop on this actor ahead of the resize enqueued right after, so by the time this runs the loop has
+    /// already exited -- the same ordering assumption HaishinKit's own syncBlurEffect-adjacent calls already
+    /// relied on before this fix, just never stated. Not verified on-device (no build/run available here).
     @ScreenActor private static func setScreenSize(_ mixer: MediaMixer, to size: CGSize) {
         mixer.screen.size = size
     }
 
-    private func syncBlurEffect() async {
-        guard let privacy, privacy.enabled != blurEffectActive else { return }
-        blurEffectActive = privacy.enabled
-        if blurEffectActive {
-            // Offscreen renders into Screen.size, which defaults to 1280x720 landscape. Without this a
-            // portrait frame gets fitted into a landscape canvas and the picture shrinks to a stamp.
-            await Self.setScreenSize(mixer, to: blurCanvasSize)
+    /// The one place that registers/unregisters the blur effect and flips videoMixerSettings.mode -- goLive(),
+    /// stopLive() and the 1s tick (via syncBlurEffect below) all route through this instead of touching
+    /// mixer.screen/videoMixerSettings directly, so there is one well-defined order instead of three callers
+    /// mutating the same state independently (which is what let stopLive() and goLive() disagree about
+    /// whether the render loop was still running -- see setScreenSize's doc). Idempotent on blurEffectActive,
+    /// so a redundant call (stopLive() forcing `false` when blur was never on, say) costs nothing.
+    private func setOffscreenMode(_ on: Bool) async {
+        guard let privacy, blurEffectActive != on else { return }
+        blurEffectActive = on
+        if on {
             _ = await mixer.screen.registerVideoEffect(privacy)
         } else {
             _ = await mixer.screen.unregisterVideoEffect(privacy)
         }
         var vm = await mixer.videoMixerSettings
-        vm.mode = blurEffectActive ? .offscreen : .passthrough
-        await mixer.setVideoMixerSettings(vm)
-        applog("stream", "privacy blur effect \(blurEffectActive ? "registered" : "unregistered"), mixer mode=\(vm.mode.rawValue)")
+        vm.mode = on ? .offscreen : .passthrough
+        await mixer.setVideoMixerSettings(vm)   // starts/stops HaishinKit's offscreen render Task -- see setScreenSize's doc
+        applog("stream", "privacy blur effect \(on ? "registered" : "unregistered"), mixer mode=\(vm.mode.rawValue)")
         syncHot()   // re-evaluate whether the glasses preview should now route through the (blurred) mixer output
+    }
+
+    private func syncBlurEffect() async {
+        guard let privacy, privacy.enabled != blurEffectActive else { return }
+        // Read once: `enabled` is a plain nonisolated(unsafe) var ContentView can flip mid-await, and the
+        // resize below and the mode flip after it must agree on the same snapshot.
+        let enabled = privacy.enabled
+        if enabled {
+            // Offscreen renders into Screen.size, which defaults to 1280x720 landscape. Without this a
+            // portrait frame gets fitted into a landscape canvas and the picture shrinks to a stamp.
+            // blurEffectActive is still false here (checked above), so the render loop is confirmed stopped
+            // -- safe per setScreenSize's doc.
+            await Self.setScreenSize(mixer, to: blurCanvasSize)
+        }
+        await setOffscreenMode(enabled)
     }
 
     /// Blur failing open is worse than no blur, because the streamer is trusting it. When detection stalls
@@ -1171,6 +1213,7 @@ final class Streamer: ObservableObject {
     func stopLive() {
         reconnectTask?.cancel()
         reconnectTask = nil
+        sessionGeometryFixed = false   // idle previews size from the phone camera again, not the ended session
         if let since = downSince, live { downtime += Date().timeIntervalSince(since) }
         downSince = nil
         speaker?.stopRepeating(id: "rtmp")
@@ -1195,6 +1238,12 @@ final class Streamer: ObservableObject {
         stopHealthMonitoring()
         rtmpState = "stopped"
         Task {
+            // Force blur off unconditionally, even if the toggle is still on: a session that ends with it
+            // on must not leave the offscreen render loop running into the next goLive() (see
+            // setScreenSize's doc -- that loop is the one thing reading Screen.size, and the next session
+            // resizes it). goLive() also forces this defensively, so this isn't the only thing standing
+            // between the two sessions, but it stops the loop from spinning uselessly while idle either way.
+            await setOffscreenMode(false)
             try? await mixer.attachVideo(nil)
             await uplink.close()
         }
