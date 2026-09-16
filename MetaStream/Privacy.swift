@@ -23,6 +23,11 @@ import Vision
 /// convention CIImage's `extent` uses. So converting a Vision box into CIImage pixel space (what `execute`
 /// does below) is a pure scale, no flip needed. A flip would only be needed if this handed the rect to
 /// something top-left/y-down, like UIKit or a CALayer overlay -- this file never does. See Self.demo().
+///
+/// Diagnostics: this whole pipeline used to be able to fail completely silently -- enabled=true, no crash,
+/// no dropped frames, just an unmodified picture -- because nothing logged what detection actually found.
+/// `execute` now logs a rate-limited (~1/s, never per-frame) summary of options/counts/composited boxes so
+/// that failure mode shows up in the log instead of needing a device test to notice.
 @MainActor final class Privacy: ObservableObject, VideoEffect {
     struct Options { var faces = true; var text = true; var barcodes = true }
 
@@ -38,6 +43,7 @@ import Vision
     nonisolated private static let pixellateScale: CGFloat = 24         // ponytail: fixed block size tuned for 720x1280; scale with frame size/box size if that ever looks wrong
     nonisolated private static let detectStallThreshold: TimeInterval = 1.0
     nonisolated private static let boxCarryCeiling: TimeInterval = 5.0  // belt-and-suspenders: drop ancient boxes even if the caller never looks at `stalled`
+    nonisolated private static let diagnosticLogInterval: TimeInterval = 1.0
 
     // nonisolated(unsafe): VNSequenceRequestHandler is Apple docs' own recommendation for reuse across
     // frames/threads. Swift 6 mode still requires this annotation since its Sendable conformance isn't
@@ -48,6 +54,8 @@ import Vision
     nonisolated(unsafe) private var boxes: [CGRect] = []     // normalized, already padded
     nonisolated(unsafe) private var lastDetectionOK = Date() // "just started" reads as healthy, not stalled
     nonisolated(unsafe) private var stalledShadow = false
+    nonisolated(unsafe) private var lastDetectionCounts = (faces: 0, text: 0, barcodes: 0)  // last Vision pass's raw observation counts, for logDiagnostic
+    nonisolated(unsafe) private var lastDiagnosticLogAt = Date.distantPast
 
     /// Hands back an obscured image, or the original image if there's nothing to hide. Called by HaishinKit
     /// once per rendered frame while this is registered on mixer.screen and the mixer is in .offscreen mode
@@ -62,27 +70,30 @@ import Vision
         if Date().timeIntervalSince(lastDetectionOK) > Self.detectStallThreshold { setStalled(true) }
         if Date().timeIntervalSince(lastDetectionOK) > Self.boxCarryCeiling { boxes = [] }
 
-        guard !boxes.isEmpty else { return image }   // nothing to hide: skip the CI render entirely
-
-        let w = extent.width, h = extent.height
-        let pixellated = image.applyingFilter("CIPixellate", parameters: [kCIInputScaleKey: Self.pixellateScale])
-        var composited = image
-        for box in boxes {
-            let rect = CGRect(x: box.minX * w, y: box.minY * h, width: box.width * w, height: box.height * h).intersection(extent)
-            guard !rect.isEmpty else { continue }
-            composited = pixellated.cropped(to: rect).composited(over: composited)
+        var result = image
+        var compositedCount = 0
+        if !boxes.isEmpty {   // nothing to hide: skip the CI render entirely
+            let w = extent.width, h = extent.height
+            let pixellated = image.applyingFilter("CIPixellate", parameters: [kCIInputScaleKey: Self.pixellateScale])
+            for box in boxes {
+                let rect = CGRect(x: box.minX * w, y: box.minY * h, width: box.width * w, height: box.height * h).intersection(extent)
+                guard !rect.isEmpty else { continue }
+                result = pixellated.cropped(to: rect).composited(over: result)
+                compositedCount += 1
+            }
         }
-        return composited
+        logDiagnosticIfDue(compositedCount: compositedCount)
+        return result
     }
 
     // MARK: detection
 
     nonisolated private func runDetection(on image: CIImage) {
-        var requests: [VNRequest] = []
-        if options.faces { requests.append(VNDetectFaceRectanglesRequest()) }
-        if options.text { requests.append(VNDetectTextRectanglesRequest()) }   // region only, no OCR -- also catches plates/badges/receipts/screens for free
-        if options.barcodes { requests.append(VNDetectBarcodesRequest()) }
-        guard !requests.isEmpty else { markDetected([]); return }
+        let faceReq = options.faces ? VNDetectFaceRectanglesRequest() : nil
+        let textReq = options.text ? VNDetectTextRectanglesRequest() : nil       // region only, no OCR -- also catches plates/badges/receipts/screens for free
+        let barcodeReq = options.barcodes ? VNDetectBarcodesRequest() : nil
+        let requests: [VNRequest] = [faceReq, textReq, barcodeReq].compactMap { $0 }
+        guard !requests.isEmpty else { lastDetectionCounts = (0, 0, 0); markDetected([]); return }
 
         // Downscale before handing Vision the frame -- boxes are normalized, so detection resolution is
         // free downstream. No pixel-buffer render needed: Vision takes a CIImage directly.
@@ -94,8 +105,14 @@ import Vision
             // orientation .up: this receives the same image HaishinKit renders straight from the mixer's
             // video track with no rotation applied, so it's already display-right-side-up.
             try sequenceHandler.perform(requests, on: small, orientation: .up)
-            let found = requests.flatMap { ($0.results as? [VNDetectedObjectObservation])?.map { Self.pad($0.boundingBox, by: Self.padFraction) } ?? [] }
-            markDetected(found)
+            // Reading .results off each concrete request (not casting the merged [VNRequest] array) both
+            // sidesteps relying on VNDetectedObjectObservation's cast succeeding for every observation type
+            // and gives an exact per-detector count for free -- see logDiagnosticIfDue.
+            let faces = (faceReq?.results ?? []).map { Self.pad($0.boundingBox, by: Self.padFraction) }
+            let texts = (textReq?.results ?? []).map { Self.pad($0.boundingBox, by: Self.padFraction) }
+            let barcodes = (barcodeReq?.results ?? []).map { Self.pad($0.boundingBox, by: Self.padFraction) }
+            lastDetectionCounts = (faces.count, texts.count, barcodes.count)
+            markDetected(faces + texts + barcodes)
         } catch {
             applog("stream", "privacy detection failed: \(error)", error: true)
             // boxes stay as they are -- carried forward per the fail-safe design; execute()'s staleness
@@ -113,6 +130,17 @@ import Vision
         guard stalledShadow != value else { return }
         stalledShadow = value
         Task { @MainActor [weak self] in self?.stalled = value }
+    }
+
+    /// Rate-limited (~1/s, never per-frame) visibility into an otherwise-silent pipeline: blur enabled with
+    /// nothing detected, or detected but nothing composited, previously looked identical to working correctly
+    /// -- no error, no dropped frame, no stall. This is what a device test needed to catch that.
+    nonisolated private func logDiagnosticIfDue(compositedCount: Int) {
+        let now = Date()
+        guard now.timeIntervalSince(lastDiagnosticLogAt) > Self.diagnosticLogInterval else { return }
+        lastDiagnosticLogAt = now
+        let opts = "faces=\(options.faces ? "on" : "off") text=\(options.text ? "on" : "off") barcodes=\(options.barcodes ? "on" : "off")"
+        applog("stream", "privacy diag: enabled=\(enabled) options(\(opts)) found(faces=\(lastDetectionCounts.faces) text=\(lastDetectionCounts.text) barcodes=\(lastDetectionCounts.barcodes)) boxes=\(boxes.count) composited=\(compositedCount) stalled=\(stalledShadow)")
     }
 
     // MARK: pure helpers -- see Self.demo()
