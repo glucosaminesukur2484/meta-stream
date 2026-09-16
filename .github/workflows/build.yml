@@ -53,7 +53,11 @@ jobs:
 
       - name: Self-checks
         run: |
-          xcodebuild test             -project MetaStream.xcodeproj             -scheme MetaStream             -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16'             -skipPackagePluginValidation -skipMacroValidation             CODE_SIGNING_ALLOWED=NO
+          # Pick whatever iPhone simulator the runner actually has; hardcoding a name drifts
+          # every time the Xcode image moves.
+          UDID=$(xcrun simctl list devices available -j | /usr/bin/python3 -c             "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k in d for x in d[k] if 'iPhone' in x['name']))")
+          echo "Using simulator $UDID"
+          xcodebuild test             -project MetaStream.xcodeproj             -scheme MetaStream             -destination "id=$UDID"             -skipPackagePluginValidation -skipMacroValidation             CODE_SIGNING_ALLOWED=NO
 
       - name: Archive (signed)
         run: |
