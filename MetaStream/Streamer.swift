@@ -680,7 +680,10 @@ final class Streamer: ObservableObject {
                 }
                 if mode != .off { applog("stream", "stabilization requested: \(phoneQuality.stabilization)") }
                 applog("stream", "camera lens=\(camSettings.lens) position=\(fallbackPosition == .front ? "front" : "back")")
-                cameraDevice = cam
+                // ponytail: re-acquire rather than reuse `cam`. Swift 6 region isolation treats `cam` as
+                // sent once it crosses into the mixer's domain, so touching it again here is a data race by
+                // construction. AVCaptureDevice.default returns the same underlying device anyway.
+                cameraDevice = CameraSettings.device(lens: camSettings.lens, position: fallbackPosition)
                 cameraCapabilities = CameraCapabilities.probe(lens: camSettings.lens, position: fallbackPosition)
                 cameraPosition = fallbackPosition
                 try? await mixer.setFrameRate(Float64(phoneQuality.fps))
