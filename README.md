@@ -44,13 +44,17 @@ MetaStream fills that gap. I wrote it for my own streams and published it so oth
 | **Tells you when it drops** | Reconnects with backoff, speaks "stream dropped" and "stream back" with a haptic, escalates if it stays down, and turns the timer amber rather than counting dead air as airtime |
 | **Health warnings** | Phone battery, phone thermal and glasses thermal, spoken once each when they cross a threshold |
 | **Stream Manager** | Sign in to Kick, Twitch, Restream and YouTube inside the app to edit the title and category, watch the viewer count, send chat, pull your stream key, and switch Restream destinations on and off |
-| **Destinations** | Presets for Kick, Twitch, YouTube and Restream, plus Instagram, TikTok and any RTMP or RTMPS server |
+| **Destinations** | Presets for Kick, Twitch, YouTube and Restream, plus Instagram, TikTok and any RTMP, RTMPS or SRT server |
+| **SRT** | Paste an `srt://` URL and it publishes over SRT instead, which survives packet loss far better on cellular. Sends HEVC untouched, so it also streams in the background without the floating window |
+| **Phone camera quality** | 720p or 1080p, portrait 9:16 or landscape 16:9, 24/30/60 fps — so the app is fully useful without glasses |
 | **Controls** | Go live and end, mic mute, camera off as black frames, photo capture to Photos, resolution, frame rate, bitrate, microphone picker, keep awake, and a heads-up display with fps, kbps and the stream timer |
 | **Logs** | Every API call, stream event and decoder error lands in Settings → Logs with a share button. Stream keys and tokens are masked before anything is written |
 
 ### Limits you should know
 
-- **720×1280 portrait at 30 fps is the ceiling.** The SDK offers nothing higher to any third-party app.
+- **720×1280 portrait at 30 fps is the ceiling for the glasses.** The SDK offers nothing higher to
+  any third-party app. The phone camera is not limited by this: it does 720p or 1080p, portrait or
+  landscape, at 24/30/60 fps.
 - **The glasses choose their own bitrate**, which measured 450 to 600 kbps at 720p30. The bitrate slider only affects video the phone encodes, meaning the fallback camera and transcoded output.
 - **Background streaming without the floating window works only for HEVC destinations.** Anything transcoded needs Picture in Picture open, because iOS stops the hardware decoder once the app leaves the screen.
 - **A paid Apple Developer team is required** to build. See [Why a paid Apple team](#why-a-paid-apple-team).
@@ -69,6 +73,7 @@ Tested against each ingest, not taken from marketing pages:
 | YouTube | yes, over enhanced RTMP | HEVC, untouched |
 | Kick | no | H.264 from the phone |
 | Restream over RTMP | no, only over SRT | H.264 from the phone |
+| Any `srt://` ingest | yes | HEVC, untouched |
 | Twitch | Affiliates and Partners only | H.264 from the phone |
 | Instagram, TikTok | no | H.264 from the phone |
 
@@ -208,10 +213,12 @@ Bluetooth but never receives a frame. This is Apple's rule, and the app can't wo
 
 ## Roadmap
 
-Local recording, SRT output, native chat with 7TV/BTTV/FFZ emotes, Twitch and YouTube chat feeds,
-adaptive bitrate on the transcode path, and privacy blur for faces, text and licence plates.
+Local recording, native chat with 7TV/BTTV/FFZ emotes, Twitch and YouTube chat feeds, and privacy
+blur for faces, text and licence plates.
 
-Chat read aloud through the glasses is done. Local recording is blocked on a format problem worth
+SRT output, adaptive bitrate and chat read aloud are done.
+
+Local recording is blocked on a format problem worth
 knowing about: one `AVAssetWriterInput` cannot take both the glasses' already-encoded HEVC and the
 mixer's raw frames, and the video source switches between them mid-session on fallback.
 
