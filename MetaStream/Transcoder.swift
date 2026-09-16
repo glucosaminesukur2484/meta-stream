@@ -63,17 +63,17 @@ final class Transcoder: @unchecked Sendable {
             if self.decoded == 1 { applog("stream", "first frame decoded \(CVPixelBufferGetWidth(image))x\(CVPixelBufferGetHeight(image))") }
             // Privacy blur, when enabled. nil = the pass could not obscure this frame, so it is dropped
             // rather than published in the clear; Streamer separately cuts to black while that persists.
-            var image = image
+            var frame = image
             if let transform = self.transform {
-                guard let obscured = transform(image) else { return }
-                image = obscured
+                guard let obscured = transform(frame) else { return }
+                frame = obscured
             }
             var fdOut: CMVideoFormatDescription?
-            CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: image, formatDescriptionOut: &fdOut)
+            CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: frame, formatDescriptionOut: &fdOut)
             guard let fdOut else { return }
             var timing = CMSampleTimingInfo(duration: dur, presentationTimeStamp: ipts.isValid ? ipts : pts, decodeTimeStamp: .invalid)
             var out: CMSampleBuffer?
-            CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: image, formatDescription: fdOut,
+            CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: frame, formatDescription: fdOut,
                                                      sampleTiming: &timing, sampleBufferOut: &out)
             if let out { self.sink(out) } else { applog("stream", "decoded frame -> CMSampleBuffer failed", error: true) }
         }

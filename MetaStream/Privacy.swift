@@ -28,12 +28,12 @@ import Vision
     nonisolated(unsafe) var options = Options()
     nonisolated(unsafe) var enabled = false   // off by default: blur is an opt-in cost (see the ADR)
 
-    private static let detectEveryNFrames = 5              // ~6 detections/s at 30fps, well inside the 33ms/frame budget shared with decode+encode
-    private static let detectionMaxDimension: CGFloat = 360 // boxes are normalized, so a small detection frame costs nothing downstream
-    private static let padFraction: CGFloat = 0.3           // generous margin: motion between detections is the risk, not one frame of under-blur
-    private static let pixellateScale: CGFloat = 24         // ponytail: fixed block size tuned for 720x1280; scale with frame size/box size if that ever looks wrong
-    private static let detectStallThreshold: TimeInterval = 1.0
-    private static let boxCarryCeiling: TimeInterval = 5.0  // belt-and-suspenders: drop ancient boxes even if the caller never looks at `stalled`
+    nonisolated private static let detectEveryNFrames = 5              // ~6 detections/s at 30fps, well inside the 33ms/frame budget shared with decode+encode
+    nonisolated private static let detectionMaxDimension: CGFloat = 360 // boxes are normalized, so a small detection frame costs nothing downstream
+    nonisolated private static let padFraction: CGFloat = 0.3           // generous margin: motion between detections is the risk, not one frame of under-blur
+    nonisolated private static let pixellateScale: CGFloat = 24         // ponytail: fixed block size tuned for 720x1280; scale with frame size/box size if that ever looks wrong
+    nonisolated private static let detectStallThreshold: TimeInterval = 1.0
+    nonisolated private static let boxCarryCeiling: TimeInterval = 5.0  // belt-and-suspenders: drop ancient boxes even if the caller never looks at `stalled`
 
     // nonisolated(unsafe): CIContext and VNSequenceRequestHandler are Apple docs' own recommendation for
     // reuse across frames/threads (CIContext explicitly documented thread-safe); Swift 6 mode still requires
