@@ -17,6 +17,9 @@ struct SettingsView: View {
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
     @AppStorage("codec") var codec = "auto"
     @AppStorage("srtLatencyMs") var srtLatencyMs = 2000
+    @AppStorage("phoneHeight") var phoneHeight = 720
+    @AppStorage("phoneLandscape") var phoneLandscape = false
+    @AppStorage("phoneFps") var phoneFps = 30
     @AppStorage("ttsMessagesOn") var ttsMessagesOn = true
     @AppStorage("ttsTipsOn") var ttsTipsOn = true
     @AppStorage("ttsFollowsOn") var ttsFollowsOn = true
@@ -92,7 +95,25 @@ struct SettingsView: View {
                         Text("Low · 360×640").tag("low"); Text("Medium · 504×896").tag("medium"); Text("High · 720×1280").tag("high")
                     }
                     Picker("Frame rate", selection: $fps) { Text("15").tag(15); Text("24").tag(24); Text("30").tag(30) }
-                } header: { Text("Video (glasses)") } footer: { Text("Applied the next time the glasses session starts.") }
+                } header: { Text("Video (glasses)") } footer: {
+                    Text("Applied the next time the glasses session starts. 720×1280 at 30 fps is the ceiling — Meta's SDK offers third-party apps nothing higher, so no setting here can raise it.")
+                }
+
+                Section {
+                    Picker("Resolution", selection: $phoneHeight) {
+                        Text("720p").tag(720); Text("1080p").tag(1080)
+                    }
+                    Picker("Aspect", selection: $phoneLandscape) {
+                        Text("Portrait 9:16").tag(false); Text("Landscape 16:9").tag(true)
+                    }
+                    Picker("Frame rate", selection: $phoneFps) {
+                        Text("24").tag(24); Text("30").tag(30); Text("60").tag(60)
+                    }
+                } header: { Text("Video (phone camera)") } footer: {
+                    Text("Used when the source pill is set to the back or front camera, so the app is fully useful without glasses. Fixed for the whole stream, because changing frame size mid-broadcast breaks players — set it before going live.
+
+Starting on the glasses pins the stream to 720×1280 at 30 fps even if the phone later takes over, so the picture stays one format end to end.")
+                }
 
                 Section("Audio") {
                     Picker("Microphone", selection: $micUID) {

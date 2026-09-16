@@ -272,6 +272,27 @@ final class Streamer: ObservableObject {
         }
     }
 
+    /// What the phone camera captures and the encoder targets. Only applies while the phone is the video
+    /// source: the glasses hand over 720x1280 at up to 30 fps and Meta's SDK offers third-party apps
+    /// nothing higher, so these settings cannot raise that — they exist so the app is useful without glasses.
+    struct PhoneQuality: Sendable {
+        var height = 720                  // 720 or 1080
+        var landscape = false
+        var fps = 30                      // 24, 30 or 60
+
+        /// Encoder frame size. Portrait is the glasses-native orientation; landscape is 16:9 for everything else.
+        var size: CGSize {
+            let long = CGFloat(height == 1080 ? 1920 : 1280), short = CGFloat(height)
+            return landscape ? CGSize(width: long, height: short) : CGSize(width: short, height: long)
+        }
+        var sessionPreset: AVCaptureSession.Preset { height == 1080 ? .hd1920x1080 : .hd1280x720 }
+    }
+
+    /// The glasses' fixed output. Not configurable — see PhoneQuality.
+    static let glassesSize = CGSize(width: 720, height: 1280)
+
+    private var phoneQuality = PhoneQuality()
+
     /// libsrt defaults latency to ~120 ms, tuned for clean links; a phone walking through a city needs
     /// far more buffer. Applied only if the user hasn't set it themselves in the URL.
     static func withSRTLatency(_ url: String, ms: Int) -> String {
@@ -539,12 +560,15 @@ final class Streamer: ObservableObject {
                 try await mixer.attachVideo(nil)
                 source = "glasses"
             } else {
-                // Encoded by HaishinKit as HEVC 720x1280 (see setVideoSettings), same codec as the glasses,
-                // so the RTMP stream never changes format. Phone capture pauses in background; glasses HEVC doesn't.
+                // Encoded by HaishinKit in whatever geometry goLive fixed for this session, so the outgoing
+                // stream never changes format even when the source switches. Phone capture pauses in the
+                // background; glasses HEVC doesn't.
                 let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: fallbackPosition)
                 await wireMixer()
+                await mixer.setSessionPreset(phoneQuality.sessionPreset)
                 try await mixer.attachVideo(cam)
-                await mixer.setVideoOrientation(.portrait)
+                try? await mixer.setFrameRate(Float64(phoneQuality.fps))
+                await mixer.setVideoOrientation(phoneQuality.landscape ? .landscapeRight : .portrait)
                 source = "phone"
             }
         } catch {
@@ -617,9 +641,10 @@ final class Streamer: ObservableObject {
     /// bitrateKbps applies to what HaishinKit encodes (phone camera, black frames); the glasses set their own HEVC bitrate.
     /// codec: "hevc" passes the glasses' stream through untouched (YouTube, Restream, own relay);
     /// "h264" decodes and re-encodes on the phone (Kick, Twitch without Affiliate). Phone-camera video follows the same choice.
-    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position, bitrateKbps: Int = 4000, codec: String = "hevc", srtLatencyMs: Int = 2000) {
+    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position, bitrateKbps: Int = 4000, codec: String = "hevc", srtLatencyMs: Int = 2000, quality: PhoneQuality = .init()) {
         // Scheme picks the transport: srt:// goes out over SRT, everything else over RTMP(S).
         // Rebuilt per session so switching ingest between streams doesn't need an app restart.
+        phoneQuality = quality
         let url = Self.withSRTLatency(url, ms: srtLatencyMs)
         uplink = Uplink.make(for: url)
         applog("stream", "uplink = \(uplink.isSRT ? "srt" : "rtmp")")
@@ -682,12 +707,18 @@ final class Streamer: ObservableObject {
 
                 // profileLevel containing "HEVC" flips HaishinKit's internal format to .hevc (onMetaData codec id);
                 // the encoder handles phone-camera video, black frames and, in H.264 mode, the decoded glasses frames.
+                // Geometry is fixed for the session: changing frame size mid-stream breaks players.
+                // Glasses dictate 720x1280 at 30; the phone camera uses whatever the user configured.
+                let onPhone = manualSource == "back" || manualSource == "front"
+                let size = onPhone ? phoneQuality.size : Self.glassesSize
+                let rate = onPhone ? phoneQuality.fps : 30
+                applog("stream", "encoder \(Int(size.width))x\(Int(size.height)) @\(rate) (\(onPhone ? "phone" : "glasses"))")
                 await uplink.setVideoSettings(VideoCodecSettings(
-                    videoSize: CGSize(width: 720, height: 1280),
+                    videoSize: size,
                     bitRate: bitrateKbps * 1000,
                     profileLevel: (h264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel) as String,
                     maxKeyFrameIntervalDuration: 2,
-                    expectedFrameRate: 30))
+                    expectedFrameRate: Float64(rate)))
                 if h264 {                                 // decoded frames need the mixer → encoder → stream path
                     await wireMixer()
                     var vm = await mixer.videoMixerSettings
