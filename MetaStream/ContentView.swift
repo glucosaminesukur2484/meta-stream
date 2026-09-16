@@ -46,7 +46,7 @@ struct ContentView: View {
     @EnvironmentObject var streamer: Streamer
     @EnvironmentObject var speaker: Speaker
     @EnvironmentObject var chat: ChatFeed
-    @AppStorage("rtmpURL") var rtmpURL = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
+    @AppStorage("rtmpURL") var ingestURL = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     // ponytail: stream key in UserDefaults; move to Keychain if the phone is shared.
     @AppStorage("streamKey") var streamKey = ""
     @AppStorage("chatSite") var chatSite = "kick"
@@ -282,7 +282,7 @@ struct ContentView: View {
                 if streamer.live {
                     streamer.stopLive()
                 } else {
-                    streamer.goLive(url: rtmpURL, key: streamKey, micUID: micUID,
+                    streamer.goLive(url: ingestURL, key: streamKey, micUID: micUID,
                                     fallbackPosition: fallbackCamera == "front" ? .front : .back,
                                     bitrateKbps: bitrateKbps, codec: codec)
                 }

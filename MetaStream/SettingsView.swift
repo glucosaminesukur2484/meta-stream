@@ -5,7 +5,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage("platform") var platform = "kick"
-    @AppStorage("rtmpURL") var rtmpURL = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
+    @AppStorage("rtmpURL") var ingestURL = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     @AppStorage("streamKey") var streamKey = ""
     @AppStorage("chatSite") var chatSite = "kick"
     @AppStorage("chatChannel") var chatChannel = ""
@@ -52,9 +52,9 @@ struct SettingsView: View {
                         Text("Custom").tag("custom")
                     }
                     .onChange(of: platform) { _, p in
-                        if let url = Self.presets[p] { rtmpURL = url } else if p != "custom" { rtmpURL = "" }
+                        if let url = Self.presets[p] { ingestURL = url } else if p != "custom" { ingestURL = "" }
                     }
-                    TextField("RTMP URL", text: $rtmpURL)
+                    TextField("Ingest URL", text: $ingestURL)
                         .font(.footnote.monospaced())
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                     HStack {
@@ -74,7 +74,7 @@ struct SettingsView: View {
                         Slider(value: Binding(get: { Double(bitrateKbps) }, set: { bitrateKbps = Int($0 / 250) * 250 }),
                                in: 1000...9000, step: 250)
                     }
-                } header: { Text("Destination") } footer: {
+                } header: { Text("Ingest") } footer: {
                     Text((Self.hints[platform] ?? "") + "\nAuto picks H.264 for Kick and Twitch (they don't take HEVC) and passthrough elsewhere. H.264 re-encodes on the phone at the bitrate below; HEVC passthrough keeps the glasses' own bitrate.")
                 }
 
