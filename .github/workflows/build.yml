@@ -51,6 +51,14 @@ jobs:
           echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Installed profile '$NAME' ($UUID)"
 
+      # The demo() self-checks are `#if DEBUG`, and the archive below is Release, so without this
+      # step they are never even compiled. This builds Debug for device so they are type-checked
+      # every run and cannot silently rot. It does NOT execute the asserts: the app traps on
+      # launch in a simulator (the Meta SDK), so a hosted test target was not worth the chase.
+      - name: Compile the DEBUG self-checks
+        run: |
+          xcodebuild build             -project MetaStream.xcodeproj             -scheme MetaStream             -configuration Debug             -destination 'generic/platform=iOS'             -skipPackagePluginValidation -skipMacroValidation             CODE_SIGNING_ALLOWED=NO
+
       - name: Archive (signed)
         run: |
           xcodebuild archive \
