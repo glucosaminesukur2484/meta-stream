@@ -750,7 +750,10 @@ final class Streamer: ObservableObject {
         let url = Self.withSRTLatency(url, ms: srtLatencyMs)
         uplink = Uplink.make(for: url)
         applog("stream", "uplink = \(uplink.isSRT ? "srt" : "rtmp")")
-        self.fallbackPosition = fallbackPosition
+        // An explicit camera pick from the source picker outranks the Settings fallback preference:
+        // that setting only says which camera to fall back TO when the glasses drop, so applying it
+        // here was silently flipping a deliberate "back camera" choice to front on GO LIVE.
+        if manualSource != "back", manualSource != "front" { self.fallbackPosition = fallbackPosition }
         let h264 = codec == "h264"
         // ponytail: adaptive bitrate's real gate is phoneEncodes ("is the phone doing the encoding"), not
         // codec == h264 — h264 always means the phone encodes, but so does hevc with the phone camera
