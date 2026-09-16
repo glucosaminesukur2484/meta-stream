@@ -40,6 +40,9 @@ MetaStream fills that gap. I wrote it for my own streams and published it so oth
 | **Codec handling** | The glasses' HEVC goes out untouched where the destination accepts it. Where it doesn't, the phone decodes and re-encodes to H.264 |
 | **Phone-camera fallback** | When the glasses drop, the back or front camera takes over within 2 seconds and the stream does not restart. You can also switch by hand |
 | **Chat** | Kick, Twitch, YouTube or Restream chat in a sheet that slides over the preview |
+| **Chat read aloud** | Kick chat spoken through the glasses' open-ear speakers, so you never take the phone out. Three priority lanes: stream warnings interrupt, alerts queue, chat drops oldest when it floods |
+| **Tells you when it drops** | Reconnects with backoff, speaks "stream dropped" and "stream back" with a haptic, escalates if it stays down, and turns the timer amber rather than counting dead air as airtime |
+| **Health warnings** | Phone battery, phone thermal and glasses thermal, spoken once each when they cross a threshold |
 | **Stream Manager** | Sign in to Kick, Twitch, Restream and YouTube inside the app to edit the title and category, watch the viewer count, send chat, pull your stream key, and switch Restream destinations on and off |
 | **Destinations** | Presets for Kick, Twitch, YouTube and Restream, plus Instagram, TikTok and any RTMP or RTMPS server |
 | **Controls** | Go live and end, mic mute, camera off as black frames, photo capture to Photos, resolution, frame rate, bitrate, microphone picker, keep awake, and a heads-up display with fps, kbps and the stream timer |
@@ -52,6 +55,8 @@ MetaStream fills that gap. I wrote it for my own streams and published it so oth
 - **Background streaming without the floating window works only for HEVC destinations.** Anything transcoded needs Picture in Picture open, because iOS stops the hardware decoder once the app leaves the screen.
 - **A paid Apple Developer team is required** to build. See [Why a paid Apple team](#why-a-paid-apple-team).
 - The glasses keep one third-party app registered at a time, so registering MetaStream unregisters StreamHand or whatever else you used.
+- **Glasses battery is not readable by third-party apps.** DAT 0.9's `DeviceState` exposes only
+  `thermalLevel`, so the app can warn that the glasses are hot but never that they are nearly flat.
 - The glasses microphone runs over Bluetooth HFP at 8 kHz. The phone mic is the default, and any input can be picked in Settings.
 
 ## Which codec goes where
@@ -203,7 +208,12 @@ Bluetooth but never receives a frame. This is Apple's rule, and the app can't wo
 
 ## Roadmap
 
-Chat read aloud through the glasses, local HEVC recording, SRT output, and several destinations at once from the phone.
+Local recording, SRT output, native chat with 7TV/BTTV/FFZ emotes, Twitch and YouTube chat feeds,
+adaptive bitrate on the transcode path, and privacy blur for faces, text and licence plates.
+
+Chat read aloud through the glasses is done. Local recording is blocked on a format problem worth
+knowing about: one `AVAssetWriterInput` cannot take both the glasses' already-encoded HEVC and the
+mixer's raw frames, and the video source switches between them mid-session on fallback.
 
 ## Credits
 
