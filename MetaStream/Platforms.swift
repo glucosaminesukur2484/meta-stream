@@ -37,9 +37,19 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     @Published var twitchLabels: Set<String> = []     // enabled content_classification_labels
     @Published var twitchDelay = 0                    // seconds; Partner-only stream delay
     @Published var twitchLanguage = ""
+    @Published private(set) var twitchScopes: Set<String> = []   // granted at last auth; see twitchHasScopes
     private var twitchUserID = ""
     // https://dev.twitch.tv/docs/api/reference/#get-content-classification-labels — the current valid CCL ids.
     static let twitchLabelIDs = ["DebatedSocialIssuesAndPolitics", "DrugsIntoxication", "SexualThemes", "ViolentGraphic", "Gambling", "ProfanityVulgarity"]
+    // Read scopes the chat feed's EventSub subscriptions need, keyed by the feature name the UI shows.
+    // user:read:chat has shipped since the first Twitch connect, so old tokens already carry it; the other
+    // three are new as of chat-feed support, so an existing user's token won't have them until they reconnect.
+    static let twitchChatScopes: [String: Set<String>] = [
+        "chat": ["user:read:chat"],
+        "follows": ["moderator:read:followers"],
+        "subscriptions": ["channel:read:subscriptions"],
+        "cheers": ["bits:read"],
+    ]
 
     // Restream
     @Published var restreamUser = ""
@@ -86,6 +96,7 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
 
     override init() {
         super.init()
+        twitchScopes = Set(d.stringArray(forKey: "twitchScopes") ?? [])
         if kickConnected { Task { await refreshKick() } }
         if twitchConnected { Task { await refreshTwitch() } }
         if restreamConnected { Task { await refreshRestream() } }
@@ -203,7 +214,10 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     func connectTwitch() {
         Task {
             do {
-                let scopes = "channel:manage:broadcast channel:read:stream_key user:write:chat user:read:chat"
+                // moderator:read:followers / channel:read:subscriptions / bits:read are read-only additions for
+                // the chat feed (follow/subscribe/cheer alerts). No write/moderation scopes here on purpose —
+                // those land with whatever milestone needs them, so a user re-authorizes at most once more.
+                let scopes = "channel:manage:broadcast channel:read:stream_key user:write:chat user:read:chat moderator:read:followers channel:read:subscriptions bits:read"
                 let dev = try await Self.form("https://id.twitch.tv/oauth2/device", ["client_id": Self.twitchID, "scopes": scopes])
                 guard let deviceCode = dev["device_code"] as? String else { throw Self.err("no device_code: \(dev)") }
                 twitchUserCode = dev["user_code"] as? String ?? ""
@@ -310,7 +324,52 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
 
     func disconnectTwitch() {
         forget("twitch"); twitchUser = ""; twitchTitle = ""; twitchCategory = nil; twitchStreamKey = ""
-        twitchTags = []; twitchLabels = []; twitchDelay = 0; twitchLanguage = ""
+        twitchTags = []; twitchLabels = []; twitchDelay = 0; twitchLanguage = ""; twitchScopes = []
+    }
+
+    /// True when every scope in `required` was granted at the last Twitch auth. Adding a scope never upgrades
+    /// an existing token and refreshing doesn't either, so callers check this before using a scoped feature
+    /// instead of discovering it's missing as a 401.
+    func twitchHasScopes(_ required: Set<String>) -> Bool { required.isSubset(of: twitchScopes) }
+
+    /// Feature names (keys of `twitchChatScopes`) whose scope is missing from the currently granted set —
+    /// empty once the user reconnects. For the UI to render a "Reconnect Twitch" prompt naming just the
+    /// affected features; nothing here disconnects the user or triggers re-auth on its own. Device-code
+    /// login has a fixed 15-minute ceiling and needs the user present, so it's the UI's call when to ask,
+    /// never automatic at launch or mid-stream.
+    var twitchMissingScopeFeatures: [String] {
+        Self.twitchChatScopes.filter { !twitchHasScopes($0.value) }.map(\.key).sorted()
+    }
+
+    // MARK: - Twitch EventSub (chat feed)
+
+    /// Subscribes one Twitch EventSub WebSocket session to everything `ChatFeed` speaks. Types/versions/
+    /// conditions per Twitch's EventSub subscription types reference (dev.twitch.tv/docs/eventsub/eventsub-
+    /// subscription-types), current as of writing:
+    ///   channel.chat.message v1  {broadcaster_user_id, user_id}           scope user:read:chat
+    ///   channel.follow       v2  {broadcaster_user_id, moderator_user_id} scope moderator:read:followers
+    ///   channel.subscribe    v1  {broadcaster_user_id}                    scope channel:read:subscriptions
+    ///   channel.cheer        v1  {broadcaster_user_id}                    scope bits:read
+    ///   channel.raid         v1  {to_broadcaster_user_id} (incoming only) no scope required
+    /// A type whose scope is missing is skipped, not attempted - Twitch would 400 it silently either way, and
+    /// skipping keeps `twitchMissingScopeFeatures` the one place that explains why an alert type went quiet.
+    func twitchSubscribeEventSub(sessionID: String) async {
+        guard !twitchUserID.isEmpty else { applog("chat", "twitch eventsub subscribe skipped: no user id yet", error: true); return }
+        let transport: [String: Any] = ["method": "websocket", "session_id": sessionID]
+        var subs: [(type: String, version: String, condition: [String: String])] = [
+            ("channel.raid", "1", ["to_broadcaster_user_id": twitchUserID]),
+        ]
+        if twitchHasScopes(["user:read:chat"]) { subs.append(("channel.chat.message", "1", ["broadcaster_user_id": twitchUserID, "user_id": twitchUserID])) }
+        if twitchHasScopes(["moderator:read:followers"]) { subs.append(("channel.follow", "2", ["broadcaster_user_id": twitchUserID, "moderator_user_id": twitchUserID])) }
+        if twitchHasScopes(["channel:read:subscriptions"]) { subs.append(("channel.subscribe", "1", ["broadcaster_user_id": twitchUserID])) }
+        if twitchHasScopes(["bits:read"]) { subs.append(("channel.cheer", "1", ["broadcaster_user_id": twitchUserID])) }
+        for s in subs {
+            do {
+                _ = try await helix("POST", "/eventsub/subscriptions", body: ["type": s.type, "version": s.version, "condition": s.condition, "transport": transport])
+            } catch {
+                applog("chat", "twitch eventsub subscribe \(s.type) failed: \(error.localizedDescription)", error: true)
+            }
+        }
     }
 
     // MARK: - Restream (OAuth 2 code flow, Basic-auth token exchange, no PKCE offered)
@@ -493,6 +552,17 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         ytDescription = ""; ytPrivacy = "public"; ytLatency = "normal"
     }
 
+    /// One page of `liveChat/messages` for the broadcast's live chat (same `ytLiveChatID` `ytSend` posts to).
+    /// Needs no new scope - `youtube.force-ssl` already covers reading. nil when there's no live chat yet
+    /// (broadcast not started/found), so the poller backs off instead of erroring.
+    func ytPollLiveChat(pageToken: String?) async throws -> (items: [[String: Any]], nextPageToken: String?, pollingIntervalMillis: Int)? {
+        guard !ytLiveChatID.isEmpty else { return nil }
+        var query = [URLQueryItem(name: "liveChatId", value: ytLiveChatID), URLQueryItem(name: "part", value: "snippet,authorDetails")]
+        if let pageToken { query.append(.init(name: "pageToken", value: pageToken)) }
+        let json = try await yt("GET", "/liveChat/messages", query: query)
+        return (json["items"] as? [[String: Any]] ?? [], json["nextPageToken"] as? String, json["pollingIntervalMillis"] as? Int ?? 5000)
+    }
+
     // MARK: - plumbing
 
     /// Authenticated JSON-object call with one token refresh + retry on 401.
@@ -525,9 +595,16 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         guard let access = json["access_token"] as? String else { throw Self.err("no access_token in \(json)") }
         d.set(access, forKey: prefix + "Access")
         if let r = json["refresh_token"] as? String { d.set(r, forKey: prefix + "Refresh") }
+        // Twitch's token response carries the actually-granted scope list (it can be less than what was
+        // requested, or - after a refresh - just the original grant). Persist it so a scope check never
+        // has to guess from what was last *requested*.
+        if let scopes = json["scope"] as? [String] {
+            d.set(scopes, forKey: prefix + "Scopes")
+            if prefix == "twitch" { twitchScopes = Set(scopes) }
+        }
     }
 
-    private func forget(_ prefix: String) { [prefix + "Access", prefix + "Refresh"].forEach { d.removeObject(forKey: $0) } }
+    private func forget(_ prefix: String) { [prefix + "Access", prefix + "Refresh", prefix + "Scopes"].forEach { d.removeObject(forKey: $0) } }
 
     /// POST application/x-www-form-urlencoded → JSON object. Non-2xx throws unless allowError (device-flow polling).
     private static func form(_ url: String, _ fields: [String: String], allowError: Bool = false, basic: (String, String)? = nil) async throws -> [String: Any] {
