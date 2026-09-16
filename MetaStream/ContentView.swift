@@ -218,17 +218,20 @@ struct ContentView: View {
                 if streamer.thermal != .nominal {
                     pill("thermometer", thermalLabel, streamer.thermal == .fair ? .white : .orange)
                 }
-                Button { tap(); cycleSource() } label: {
-                    pill(streamer.source == "phone" ? "iphone" : "eyeglasses",
-                         streamer.manualSource == "auto" ? "auto · \(streamer.source)" : streamer.manualSource,
-                         streamer.source == "phone" ? .orange : .white)
-                }
-                .buttonStyle(.plain)
+                pill(streamer.source == "phone" ? "iphone" : "eyeglasses",
+                     streamer.manualSource == "auto" ? "auto · \(streamer.source)" : streamer.manualSource,
+                     streamer.source == "phone" ? .orange : .white)
                 Button { tap(); speaker.muted.toggle() } label: {
                     // Silences chat and alerts only. Stream warnings speak regardless — see Speaker.
                     pill(speaker.muted ? "speaker.slash.fill" : "speaker.wave.2.fill", speaker.muted ? "tts off" : "tts", speaker.muted ? .orange : .white)
                 }
                 .buttonStyle(.plain)
+                Button { tap(); streamer.capturePhoto() } label: {
+                    pill("camera.shutter.button", "photo", .white)
+                }
+                .buttonStyle(.plain)
+                .disabled(streamer.glassesShort != "streaming")
+                .opacity(streamer.glassesShort == "streaming" ? 1 : 0.4)
                 Button { tap(); showManager = true } label: {
                     pill("slider.horizontal.3", "manage", .cyan)
                 }
@@ -256,11 +259,15 @@ struct ContentView: View {
         speaker.showOrigin = origins > 1
     }
 
-    /// auto → glasses → back → front → auto
-    private func cycleSource() {
-        let order = ["auto", "glasses", "back", "front"]
-        let i = order.firstIndex(of: streamer.manualSource) ?? 0
-        streamer.setSource(order[(i + 1) % order.count])
+    /// Shows what is actually on air, not what was asked for — on auto those differ whenever the
+    /// glasses drop and the phone takes over.
+    private var sourceIcon: String {
+        switch streamer.manualSource {
+        case "glasses": return "eyeglasses"
+        case "back": return "camera.fill"
+        case "front": return "camera.rotate.fill"
+        default: return streamer.source == "phone" ? "iphone" : "eyeglasses"
+        }
     }
 
     /// nil below moderate — a pill that never clears is noise on a screen you glance at mid-walk.
@@ -315,9 +322,24 @@ struct ContentView: View {
                 tap()
                 streamer.glassesOn ? streamer.stopGlasses() : streamer.startGlasses(resolution: resolution, fps: UInt(fpsSetting))
             }
-            roundButton("camera.shutter.button", filled: false) { tap(); streamer.capturePhoto() }
-                .disabled(streamer.glassesShort != "streaming")
-                .opacity(streamer.glassesShort == "streaming" ? 1 : 0.4)
+            // A picker, not a cycler: hunting for the right source by tapping through four states is
+            // the wrong interaction when the shot is already wrong on stream.
+            Menu {
+                Picker("Video source", selection: Binding(get: { streamer.manualSource },
+                                                          set: { tap(); streamer.setSource($0) })) {
+                    Label("Auto", systemImage: "wand.and.stars").tag("auto")
+                    Label("Glasses", systemImage: "eyeglasses").tag("glasses")
+                    Label("Back camera", systemImage: "camera.fill").tag("back")
+                    Label("Front camera", systemImage: "camera.rotate.fill").tag("front")
+                }
+            } label: {
+                Image(systemName: sourceIcon)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(streamer.manualSource == "auto" ? .white : .black)
+                    .frame(width: 52, height: 52)
+                    .background(streamer.manualSource == "auto" ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(.white), in: Circle())
+            }
+            .buttonStyle(.plain)
 
             Button {
                 tap(strong: true)
