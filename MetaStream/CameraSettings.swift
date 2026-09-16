@@ -9,8 +9,11 @@ import CoreMedia
 /// see loadFromDefaults() below. Re-read and re-applied on every camera attach (switchTo(glasses:) in
 /// Streamer.swift), so a front/back switch always gets the current values, not a Go-Live-time snapshot.
 struct CameraSettings: Sendable {
+    // ponytail: no longer a device selector (see captureDevice(position:)'s doc -- the zoom-scale rewrite
+    // that fixed the ~6x-on-telephoto bug). Kept only so the lens strip/Settings picker have something to
+    // highlight and old stored values keep loading; apply() never reads it.
     var lens = "wide"                    // "wide" | "ultrawide" | "telephoto"
-    var zoom: Double = 1.0
+    var zoom: Double = 1.0               // videoZoomFactor on whatever captureDevice(position:) attaches
 
     var focusMode = "continuous"         // "continuous" | "auto" | "manual"
     var lensPosition: Double = 0.5       // 0...1, used only when focusMode == "manual"
@@ -97,9 +100,9 @@ struct LensOption: Equatable {
 extension CameraSettings {
     /// Discovers the physical camera for `lens` at `position`, falling back to the standard wide lens
     /// (present on every iPhone that has a camera at all) when the device has no ultra-wide/telephoto --
-    /// e.g. non-Pro models have no telephoto, older/smaller ones may lack ultra-wide too. Shared by
-    /// Streamer's attach path and the Settings screen's capability probe, so both agree on which device
-    /// a given lens choice actually resolves to.
+    /// e.g. non-Pro models have no telephoto, older/smaller ones may lack ultra-wide too. NOT the attach
+    /// path any more (see captureDevice(position:)) -- only fieldOfViewMultiplier's per-lens FOV lookup
+    /// and captureDevice's own single-lens fallback still call this.
     static func device(lens: String, position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         let type = CameraLens(rawValue: lens)?.deviceType ?? .builtInWideAngleCamera
         let found = AVCaptureDevice.DiscoverySession(deviceTypes: [type], mediaType: .video, position: position).devices.first
@@ -116,6 +119,30 @@ extension CameraSettings {
         CameraLens.allCases.filter {
             AVCaptureDevice.DiscoverySession(deviceTypes: [$0.deviceType], mediaType: .video, position: position).devices.first != nil
         }
+    }
+
+    /// The virtual multi-camera device for `position`, richest to plainest: triple (ultra-wide+wide+tele)
+    /// > dual-wide (ultra-wide+wide) > dual (wide+tele). nil on single-lens hardware (e.g. iPhone SE) or a
+    /// front camera -- no virtual front-camera device type exists.
+    private static func virtualDevice(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: position)
+            ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: position)
+            ?? AVCaptureDevice.default(.builtInDualCamera, for: .video, position: position)
+    }
+
+    /// THE attach path (Streamer.switchTo, CameraCapabilities/CameraFormatCapabilities.probe): the virtual
+    /// multi-camera device when one exists, else the plain wide lens. Fixes the device-confirmed "~6x zoom
+    /// on lens select" bug -- this app used to attach a *physical* lens device (e.g. builtInTelephotoCamera,
+    /// via device(lens:position:)) and set videoZoomFactor to the lens's multiplier RELATIVE TO WIDE (from
+    /// virtualDeviceSwitchOverVideoZoomFactors, see lensOptions below). But videoZoomFactor==1.0 on a
+    /// physical telephoto is ALREADY ~3x wide's framing, so setting it to that same relative multiplier
+    /// (e.g. 3) compounded to ~9x. Attaching the virtual device instead means videoZoomFactor IS the
+    /// wide-anchored scale everywhere -- one number, and iOS switches the physical lens underneath at the
+    /// switch-over points on its own, exactly like the system Camera app. Its minAvailableVideoZoomFactor
+    /// can be below 1.0 (ultra-wide) -- CameraSettings.apply already clamps against the device's own
+    /// min/max rather than assuming a 1.0 floor, so that just works.
+    static func captureDevice(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        virtualDevice(position: position) ?? device(lens: "wide", position: position)
     }
 
     /// Ascending by real zoom factor (ultra-wide < wide < telephoto -- always true by physical definition,
@@ -142,9 +169,7 @@ extension CameraSettings {
 
         var ultrawideFactor: Double?
         var telephotoFactor: Double?
-        let virtual = AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: position)
-            ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: position)
-            ?? AVCaptureDevice.default(.builtInDualCamera, for: .video, position: position)
+        let virtual = virtualDevice(position: position)
         if let virtual {
             let switchOvers = virtual.virtualDeviceSwitchOverVideoZoomFactors.map(\.doubleValue)
             let virtualMin = Double(virtual.minAvailableVideoZoomFactor)   // CGFloat on the SDK -- explicit, not assumed
@@ -343,10 +368,12 @@ extension CameraSettings {
     }
 }
 
-/// What SettingsView's Camera screen greys controls out against -- probed fresh whenever the lens or
-/// fallback-camera position picker changes, since front/back (and wide/ultrawide/telephoto) genuinely
-/// differ. `nil` fields mean "camera unavailable" (e.g. no camera at all in the Simulator), in which case
-/// the whole screen shows its no-camera notice instead of guessing.
+/// What SettingsView's Camera screen greys controls out against -- probed fresh whenever the fallback-
+/// camera position picker changes, since front/back genuinely differ. One probe per POSITION, not per
+/// lens: captureDevice(position:) attaches one (virtual, usually) device covering every lens, so that's
+/// the only device whose capabilities matter (see captureDevice's doc). `nil` fields mean "camera
+/// unavailable" (e.g. no camera at all in the Simulator), in which case the whole screen shows its
+/// no-camera notice instead of guessing.
 struct CameraCapabilities {
     var zoomRange: ClosedRange<Double>
     var focusAuto: Bool
@@ -363,8 +390,8 @@ struct CameraCapabilities {
     var torch: Bool
     var geometricDistortionCorrection: Bool
 
-    static func probe(lens: String, position: AVCaptureDevice.Position) -> CameraCapabilities? {
-        guard let device = CameraSettings.device(lens: lens, position: position) else { return nil }
+    static func probe(position: AVCaptureDevice.Position) -> CameraCapabilities? {
+        guard let device = CameraSettings.captureDevice(position: position) else { return nil }
         let f = device.activeFormat
         return CameraCapabilities(
             zoomRange: device.minAvailableVideoZoomFactor...max(device.minAvailableVideoZoomFactor, device.maxAvailableVideoZoomFactor),
@@ -384,14 +411,15 @@ struct CameraCapabilities {
     }
 }
 
-/// What resolutions THIS lens/position can actually shoot, and for each, the frame rates and stabilisation
+/// What resolutions THIS position can actually shoot, and for each, the frame rates and stabilisation
 /// modes that resolution's capture format(s) support -- replaces the old fixed 720p/1080p x 24/30/60 x
 /// off/standard/cinematic/action lists Settings used to offer on every device regardless of hardware. Built
 /// from AVCaptureSession.Preset support rather than raw device.formats enumeration -- Streamer's capture
 /// pipeline already selects resolution via mixer.setSessionPreset(phoneQuality.sessionPreset) (see
 /// PhoneQuality), so probing exactly the presets that pipeline can pick between (720p/1080p/4K) keeps this
-/// incapable of ever offering a resolution the capture side can't actually set. Probed fresh per lens/
-/// position exactly like CameraCapabilities.probe, for the same reason.
+/// incapable of ever offering a resolution the capture side can't actually set. One probe per position, not
+/// per lens -- see CameraCapabilities' doc for why (captureDevice(position:) attaches one device for every
+/// lens now); formats/stabilisation modes are that device's.
 struct CameraFormatCapabilities {
     struct Resolution: Equatable {
         let height: Int                     // matches PhoneQuality.height's encoding (720/1080/2160)
@@ -415,8 +443,8 @@ struct CameraFormatCapabilities {
     private static let standardFps = [15, 24, 25, 30, 50, 60, 120, 240]
     private static let stabilizationNames = ["standard", "cinematic", "action"]
 
-    static func probe(lens: String, position: AVCaptureDevice.Position) -> CameraFormatCapabilities? {
-        guard let device = CameraSettings.device(lens: lens, position: position) else { return nil }
+    static func probe(position: AVCaptureDevice.Position) -> CameraFormatCapabilities? {
+        guard let device = CameraSettings.captureDevice(position: position) else { return nil }
         let resolutions: [Resolution] = candidates.compactMap { height, preset, dims in
             guard device.supportsSessionPreset(preset) else { return nil }
             // Union fps/stabilisation across every format matching this preset's pixel dimensions --
@@ -542,6 +570,17 @@ extension CameraSettings {
         assert(zoomMultiplier(wideFOVDegrees: 75, otherFOVDegrees: 35) > zoomMultiplier(wideFOVDegrees: 75, otherFOVDegrees: 50), "narrower FOV -> bigger multiplier")
         assert(multiplierLabel(2.98) == "3", "rounds hardware noise to a clean whole number")
         assert(multiplierLabel(0.52) == "0.5", "keeps a genuine half-step")
+
+        // Zoom-scale fix (device-confirmed ~6x-on-telephoto bug): selecting a lens now sets camZoom to its
+        // wide-anchored switch-over factor, and captureDevice(position:) attaches the virtual multi-camera
+        // device so THAT factor is directly the videoZoomFactor to set -- no separate "relative to the
+        // physical lens" scale to compound against. apply() clamps through this exact clamped(), so proving
+        // it here proves the production path: "3x" selected -> videoZoomFactor 3, not 3x-on-top-of-3x=9(ish).
+        assert(clamped(3.0, min: 0.5, max: 10.0) == 3.0, "a lens's switch-over factor maps 1:1 to videoZoomFactor on the virtual device")
+        // Virtual device's minAvailableVideoZoomFactor is ultra-wide's factor, below 1.0 -- apply() must
+        // clamp against the device's own floor, never an assumed 1.0.
+        assert(clamped(0.5, min: 0.5, max: 10.0) == 0.5, "ultra-wide's switch-over sits at the virtual device's real (below-1.0) floor")
+        assert(clamped(0.2, min: 0.5, max: 10.0) == 0.5, "a request below that floor still clamps to it, not to 1.0")
 
         print("CameraSettings.demo() ok")
     }

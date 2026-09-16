@@ -602,7 +602,12 @@ struct ContentView: View {
                             tap()
                             camLens = option.lens.rawValue
                             camZoom = option.zoomFactor   // one zoom value, three ways to change it -- see the pinch gesture's doc
-                            streamer.switchLens(option.lens.rawValue)
+                            // No reattach: captureDevice(position:) already attaches the virtual device
+                            // whose videoZoomFactor domain option.zoomFactor is IN (see CameraSettings.
+                            // captureDevice's doc -- fixes the ~6x-on-telephoto bug), so this is a live
+                            // setting change like any other slider, not a different device.
+                            applog("stream", "camera lens=\(option.lens.rawValue) zoom=\(String(format: "%.2f", option.zoomFactor))x")
+                            streamer.applyCameraSettings()
                         } label: {
                             Text(option.label)
                                 .font(.caption2.weight(.bold))
