@@ -8,13 +8,19 @@ final class Transcoder: @unchecked Sendable {
     private var session: VTDecompressionSession?
     private var format: CMFormatDescription?
     private let sink: @Sendable (CMSampleBuffer) -> Void
+    /// Runs on the decoded frame before it becomes a sample buffer — this is where privacy blur sits.
+    /// Returning nil means "do not publish this frame", which is how the blur pass fails closed.
+    private let transform: (@Sendable (CVPixelBuffer) -> CVPixelBuffer?)?
     private var failures = 0
     private var callbackFailures = 0
     private(set) var decoded = 0
     private var synced = false        // HEVC decoding can only begin on a keyframe
     private var skipped = 0
 
-    init(sink: @escaping @Sendable (CMSampleBuffer) -> Void) { self.sink = sink }
+    init(transform: (@Sendable (CVPixelBuffer) -> CVPixelBuffer?)? = nil, sink: @escaping @Sendable (CMSampleBuffer) -> Void) {
+        self.transform = transform
+        self.sink = sink
+    }
 
     func decode(_ sb: CMSampleBuffer) {
         guard let fd = sb.formatDescription else { return }
@@ -55,6 +61,13 @@ final class Transcoder: @unchecked Sendable {
             }
             self.decoded += 1
             if self.decoded == 1 { applog("stream", "first frame decoded \(CVPixelBufferGetWidth(image))x\(CVPixelBufferGetHeight(image))") }
+            // Privacy blur, when enabled. nil = the pass could not obscure this frame, so it is dropped
+            // rather than published in the clear; Streamer separately cuts to black while that persists.
+            var image = image
+            if let transform = self.transform {
+                guard let obscured = transform(image) else { return }
+                image = obscured
+            }
             var fdOut: CMVideoFormatDescription?
             CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: image, formatDescriptionOut: &fdOut)
             guard let fdOut else { return }

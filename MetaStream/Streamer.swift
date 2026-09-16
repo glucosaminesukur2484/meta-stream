@@ -149,6 +149,8 @@ final class Streamer: ObservableObject {
     var pip: PiPController?                        // owned here so it outlives SwiftUI view rebuilds
     // ponytail: plain optional, not weak — Speaker never references Streamer, so no retain cycle. App.swift sets it once.
     var speaker: Speaker?
+    var privacy: Privacy?
+    private var blurHidCamera = false
     private var lastFrames = 0
     private var lastBytes = 0
 
@@ -345,6 +347,7 @@ final class Streamer: ObservableObject {
                 self.lastFrames = f; self.lastBytes = b
                 tick += 1
                 await self.adaptBitrate()
+                self.checkBlurStall()
                 if self.live, tick % 5 == 0 {
                     let mode = self.hot.transcoder == nil ? "hevc-passthrough" : "h264-transcode"
                     applog("stream", "stats source=\(self.source) \(mode) glassesFps=\(self.fps) glassesKbps=\(self.kbps) sent=\(self.hot.sent) decoded=\(self.hot.transcoder?.decoded ?? 0) appended=\(self.hot.appended)")
@@ -675,7 +678,8 @@ final class Streamer: ObservableObject {
             let mixer = self.mixer, hot = self.hot
             // Warm-up decodes to get the decoder synced to a keyframe, but nothing reaches the encoder until
             // publishing: video arriving before the publish handshake completes makes ingests drop the connection.
-            hot.transcoder = Transcoder { sb in
+            let privacy = self.privacy
+            hot.transcoder = Transcoder(transform: { buf in privacy?.process(buf) }) { sb in
                 guard hot.live else { return }
                 hot.appended += 1
                 Task { await mixer.append(sb) }
@@ -687,7 +691,7 @@ final class Streamer: ObservableObject {
         // New session: reset the downtime/drop counters. liveSince is set once, below, on the first successful
         // connect, and is deliberately NOT reset by a reconnect — a session (GO LIVE → END LIVE) survives drops.
         downtime = 0; drops = 0; connectedSince = nil; sessionSummary = nil
-        downSince = nil; escalated2m = false; escalated5m = false; backoff = 1
+        downSince = nil; escalated2m = false; escalated5m = false; backoff = 1; blurHidCamera = false
         warnedPhoneBattery = false; warnedThermal = false; warnedGlassesThermal = false
         startHealthMonitoring()
         reconnectTask?.cancel()
@@ -789,6 +793,25 @@ final class Streamer: ObservableObject {
         currentBitrateKbps = next
         lastBitrateAdjustAt = Date()
         applog("stream", "bitrate \(up ? "up" : "down") -> \(next) kbps (\(reason))")
+    }
+
+    /// Blur failing open is worse than no blur, because the streamer is trusting it. When detection stalls
+    /// we hide the picture rather than publish frames we could not obscure, and say so out loud — silence
+    /// would leave someone walking down a street believing faces were still being covered. Reuses the
+    /// existing black-frame path, so the HUD honestly reads "cam off" for as long as it holds.
+    private func checkBlurStall() {
+        guard let privacy, privacy.enabled, live else { return }
+        if privacy.stalled, !cameraOff {
+            blurHidCamera = true
+            setCameraOff(true)
+            speaker?.speakSystem("blur stopped working, camera hidden")
+            applog("stream", "privacy blur stalled - camera hidden", error: true)
+        } else if !privacy.stalled, blurHidCamera {
+            blurHidCamera = false
+            setCameraOff(false)
+            speaker?.speakSystem("blur working, camera back")
+            applog("stream", "privacy blur recovered - camera back")
+        }
     }
 
     /// Pure step: 20% down (floors at floorKbps), 10% up (ceilings at ceilingKbps). No I/O, no HaishinKit —
