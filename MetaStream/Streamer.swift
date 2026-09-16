@@ -62,12 +62,18 @@ private actor QueueWatcher: StreamBitRateStrategy {
     }
 }
 
-/// Mirrors the mixer's video (phone camera, black frames) into the same preview layer the glasses use,
-/// so one layer feeds the screen and Picture in Picture whatever the source is.
+/// Mirrors the mixer's video (phone camera, black frames, and -- while blur is on -- decoded glasses frames)
+/// into the same preview layer the glasses use, so one layer feeds the screen and Picture in Picture whatever
+/// the source is. videoTrackId == UInt8.max (not a specific track number) is deliberate: that's HaishinKit's
+/// sentinel for the mixer's final rendered/composited output -- the exact same tap RTMPStream/SRTStream use
+/// (checked HaishinKit 2.1.0 source: both default videoTrackId to UInt8.max) -- so this shows whatever
+/// actually goes out, effects included. A specific track number instead (e.g. 0) taps the RAW per-track
+/// input before Screen/effects ever see it, in every mixer mode; that was the bug that kept the local
+/// preview looking clean while blur silently did nothing to it.
 private final class LayerSink: MediaMixerOutput, @unchecked Sendable {
     private let hot: Hot
     init(hot: Hot) { self.hot = hot }
-    var videoTrackId: UInt8? { 0 }
+    var videoTrackId: UInt8? { UInt8.max }
     var audioTrackId: UInt8? { nil }
     func mixer(_ mixer: MediaMixer, didOutput sampleBuffer: CMSampleBuffer) {
         guard hot.showMixerVideo, let p = hot.preview else { return }
@@ -103,7 +109,15 @@ final class Streamer: ObservableObject {
 
     private func syncHot() {
         hot.forward = source == "glasses" && !cameraOff
-        let show = source == "phone" || cameraOff
+        // The glasses preview normally shows the raw HEVC stream directly (AVSampleBufferDisplayLayer decodes
+        // it itself -- lower latency than round-tripping through the mixer), but that raw stream can never be
+        // blurred: it never reaches the mixer (see the ADR). While glasses frames are actually being decoded
+        // (warm or live, H.264 mode) with blur on, route the preview through the mixer instead, same as phone
+        // camera/black frames, so the streamer sees what's actually going out rather than a clean picture that
+        // silently isn't what the audience gets. Called from goLive()/stopLive()/syncBlurEffect() too, since
+        // those flip the state this depends on without themselves being observed properties.
+        let glassesBlurredLive = hot.forward && hot.transcoder != nil && (hot.live || hot.warm) && (privacy?.enabled == true)
+        let show = source == "phone" || cameraOff || glassesBlurredLive
         if show != hot.showMixerVideo { hot.showMixerVideo = show; hot.preview?.flush() }   // format switches between sources
     }
     @Published var lastPhotoAt: Date?
@@ -155,6 +169,7 @@ final class Streamer: ObservableObject {
     var speaker: Speaker?
     var privacy: Privacy?
     private var blurHidCamera = false
+    private var blurEffectActive = false   // mirrors privacy.enabled -- tracks whether the effect is registered on mixer.screen
     private var lastFrames = 0
     private var lastBytes = 0
 
@@ -351,6 +366,7 @@ final class Streamer: ObservableObject {
                 self.lastFrames = f; self.lastBytes = b
                 tick += 1
                 await self.adaptBitrate()
+                await self.syncBlurEffect()
                 self.checkBlurStall()
                 if self.live, tick % 5 == 0 {
                     let mode = self.hot.transcoder == nil ? "hevc-passthrough" : "h264-transcode"
@@ -683,8 +699,9 @@ final class Streamer: ObservableObject {
             let mixer = self.mixer, hot = self.hot
             // Warm-up decodes to get the decoder synced to a keyframe, but nothing reaches the encoder until
             // publishing: video arriving before the publish handshake completes makes ingests drop the connection.
-            let privacy = self.privacy
-            hot.transcoder = Transcoder(transform: { buf in privacy?.process(buf) }) { sb in
+            // Blur (if enabled) happens once, in the mixer via syncBlurEffect() below -- not here anymore,
+            // so decoded frames are never pixellated twice.
+            hot.transcoder = Transcoder { sb in
                 guard hot.live else { return }
                 hot.appended += 1
                 Task { await mixer.append(sb) }
@@ -730,13 +747,15 @@ final class Streamer: ObservableObject {
                     expectedFrameRate: Float64(rate)))
                 if h264 {                                 // decoded frames need the mixer → encoder → stream path
                     await wireMixer()
+                    await Self.setScreenSize(mixer, to: size)   // offscreen rendering (blur) must output the geometry fixed above
                     var vm = await mixer.videoMixerSettings
-                    vm.mode = .passthrough                // track 0 straight through to the encoder
-                    vm.mainTrack = 0
+                    vm.mainTrack = 0                       // track 0 straight through to the encoder
                     await mixer.setVideoMixerSettings(vm)
+                    await syncBlurEffect()                 // registers blur + switches to .offscreen if already enabled
                     // Decode before connecting: an ingest that finds no video in its first seconds of probing
                     // treats the whole session as audio-only. Warm up, then connect with frames already flowing.
                     hot.warm = true
+                    syncHot()                              // glasses+blur: preview switches to the (blurred) mixer output now that decode is starting
                     rtmpState = "syncing decoder…"
                     var waited = 0
                     while hot.transcoder?.decoded == 0, waited < 80 { try await Task.sleep(for: .milliseconds(100)); waited += 1 }
@@ -798,6 +817,39 @@ final class Streamer: ObservableObject {
         currentBitrateKbps = next
         lastBitrateAdjustAt = Date()
         applog("stream", "bitrate \(up ? "up" : "down") -> \(next) kbps (\(reason))")
+    }
+
+    /// Keeps the mixer's blur effect registration and rendering mode in sync with Privacy.enabled. Privacy
+    /// exposes `enabled` as a plain var that ContentView sets directly (see ContentView's blur toggle) with
+    /// no delegate back to Streamer, so this is polled from the 1s stats tick; goLive()'s h264 setup also
+    /// calls it once up front so a session that starts with blur already on doesn't wait a full tick for its
+    /// first frames to be covered.
+    ///
+    /// registerVideoEffect hooks mixer.screen (HaishinKit's offscreen render object, track 0 by default) --
+    /// checked HaishinKit 2.1.0 and 2.2.5 source directly: that's the one place phone camera, black frames
+    /// and (in H.264 mode) decoded glasses frames all pass through, since every mixer.append/attachVideo call
+    /// feeds it regardless of mode. Effects only run while the mixer is in .offscreen mode, though --
+    /// .passthrough skips Screen/VideoTrackScreenObject rendering entirely and forwards raw buffers straight
+    /// to the encoder, which is why blur silently did nothing before this. Offscreen costs more (an extra
+    /// render pass), so it's only switched on while blur is actually enabled.
+    /// `Screen` lives on HaishinKit's own global actor, so its size can't be assigned from the main actor.
+    @ScreenActor private static func setScreenSize(_ mixer: MediaMixer, to size: CGSize) {
+        mixer.screen.size = size
+    }
+
+    private func syncBlurEffect() async {
+        guard let privacy, privacy.enabled != blurEffectActive else { return }
+        blurEffectActive = privacy.enabled
+        if blurEffectActive {
+            _ = await mixer.screen.registerVideoEffect(privacy)
+        } else {
+            _ = await mixer.screen.unregisterVideoEffect(privacy)
+        }
+        var vm = await mixer.videoMixerSettings
+        vm.mode = blurEffectActive ? .offscreen : .passthrough
+        await mixer.setVideoMixerSettings(vm)
+        applog("stream", "privacy blur effect \(blurEffectActive ? "registered" : "unregistered"), mixer mode=\(vm.mode.rawValue)")
+        syncHot()   // re-evaluate whether the glasses preview should now route through the (blurred) mixer output
     }
 
     /// Blur failing open is worse than no blur, because the streamer is trusting it. When detection stalls
@@ -1021,6 +1073,7 @@ final class Streamer: ObservableObject {
         hot.warm = false
         hot.transcoder?.invalidate()
         hot.transcoder = nil
+        syncHot()   // decode stopped: glasses preview (if that's what routed it) falls back to the raw HEVC feed
         currentBitrateKbps = 0
         thermalCeilingKbps = nil
         cleanTicks = 0
