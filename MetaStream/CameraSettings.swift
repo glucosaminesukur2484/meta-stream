@@ -443,17 +443,39 @@ struct CameraFormatCapabilities {
     private static let standardFps = [15, 24, 25, 30, 50, 60, 120, 240]
     private static let stabilizationNames = ["standard", "cinematic", "action"]
 
+    /// Diagnostics: this probe returning empty/nil on real hardware has cost several device round-trips
+    /// already (it silently dropped Resolution/Frame rate/Stabilisation together from Settings -- see the
+    /// commit that restored Stabilisation unconditionally). Read supportsSessionPreset(_:) and .formats
+    /// against Apple's docs before adding this: neither has a documented session/attach precondition --
+    /// both are plain capability queries on the AVCaptureDevice object itself, and captureDevice(position:)
+    /// (AVCaptureDevice.default) needs no session either -- so calling this from Settings before any camera
+    /// attach should be fine. Couldn't verify on a device, so instead of guessing further this logs the
+    /// whole funnel -- one line per probe() call (this runs on Settings appear/position change, never
+    /// per-frame, so no extra rate limiting needed), showing exactly which step drops each candidate: 0
+    /// device.formats at all points at the device/hardware; formats present but 0 survive a step points at
+    /// OUR filter predicate (dims tuple, standardFps list, etc.), not the device.
     static func probe(position: AVCaptureDevice.Position) -> CameraFormatCapabilities? {
-        guard let device = CameraSettings.captureDevice(position: position) else { return nil }
+        guard let device = CameraSettings.captureDevice(position: position) else {
+            applog("stream", "format probe: no capture device at position=\(position == .front ? "front" : "back")", error: true)
+            return nil
+        }
+        let totalFormats = device.formats.count
+        var perCandidate: [String] = []
         let resolutions: [Resolution] = candidates.compactMap { height, preset, dims in
-            guard device.supportsSessionPreset(preset) else { return nil }
+            guard device.supportsSessionPreset(preset) else {
+                perCandidate.append("\(height)p: preset unsupported")
+                return nil
+            }
             // Union fps/stabilisation across every format matching this preset's pixel dimensions --
             // several formats (different binning/color spaces) commonly share one resolution.
             let matching = device.formats.filter {
                 let d = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
                 return (Int(d.width), Int(d.height)) == dims || (Int(d.height), Int(d.width)) == dims
             }
-            guard !matching.isEmpty else { return nil }
+            guard !matching.isEmpty else {
+                perCandidate.append("\(height)p: preset ok, 0/\(totalFormats) formats match dims \(dims)")
+                return nil
+            }
             var fps: Set<Int> = []
             for format in matching {
                 for range in format.videoSupportedFrameRateRanges {
@@ -462,13 +484,23 @@ struct CameraFormatCapabilities {
                 }
             }
             let offeredFps = standardFps.filter { fps.contains($0) }
-            guard !offeredFps.isEmpty else { return nil }
+            guard !offeredFps.isEmpty else {
+                perCandidate.append("\(height)p: \(matching.count) formats matched dims, but none of \(standardFps) is in their fps ranges (raw union: \(fps.sorted()))")
+                return nil
+            }
             let stab = stabilizationNames.filter { name in
                 matching.contains { $0.isVideoStabilizationModeSupported(Streamer.stabilizationMode(name)) }
             }
+            perCandidate.append("\(height)p: ok, \(matching.count) formats, fps=\(offeredFps), stab=\(["off"] + stab)")
             return Resolution(height: height, frameRates: offeredFps, stabilizationModes: ["off"] + stab)
         }
-        return resolutions.isEmpty ? nil : CameraFormatCapabilities(resolutions: resolutions.sorted { $0.height < $1.height })
+        applog("stream", "format probe: device=\(device.localizedName) type=\(device.deviceType.rawValue) "
+            + "position=\(position == .front ? "front" : "back") formats=\(totalFormats) -- \(perCandidate.joined(separator: "; "))")
+        guard !resolutions.isEmpty else {
+            applog("stream", "format probe: 0/\(candidates.count) candidates survived -- Settings will show its no-format-info fallback, Resolution/Frame rate keep their last-saved values", error: true)
+            return nil
+        }
+        return CameraFormatCapabilities(resolutions: resolutions.sorted { $0.height < $1.height })
     }
 
     /// Nearest available resolution to a stored/desired height -- exact match if present, otherwise the
