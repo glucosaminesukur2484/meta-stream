@@ -16,6 +16,7 @@ struct SettingsView: View {
     @AppStorage("keepAwake") var keepAwake = true
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
     @AppStorage("codec") var codec = "auto"
+    @AppStorage("srtLatencyMs") var srtLatencyMs = 2000
     @AppStorage("ttsMessagesOn") var ttsMessagesOn = true
     @AppStorage("ttsTipsOn") var ttsTipsOn = true
     @AppStorage("ttsFollowsOn") var ttsFollowsOn = true
@@ -39,7 +40,7 @@ struct SettingsView: View {
         "restream": "Fans out to every destination set up in the Restream dashboard. Their RTMP ingest is H.264 only (HEVC needs SRT), so Auto transcodes.",
         "instagram": "Open Live Producer on instagram.com (desktop) and copy the stream URL and key here. H.264 only, up to 4000 kbps.",
         "tiktok": "Get the server URL and key from TikTok LIVE Studio and paste both here. H.264 only.",
-        "custom": "Any RTMP/RTMPS server, such as your own relay. Auto sends HEVC untouched; switch to H.264 if your server refuses it.",
+        "custom": "Any RTMP, RTMPS or SRT server, such as your own relay. Paste an srt:// URL to publish over SRT, which survives packet loss far better on cellular — put the stream key in its streamid query item, since SRT has no separate publish name. Auto sends HEVC untouched; switch to H.264 if your server refuses it.",
     ]
 
     var body: some View {
@@ -73,6 +74,9 @@ struct SettingsView: View {
                         HStack { Text("Bitrate"); Spacer(); Text(String(bitrateKbps) + " kbps").monospacedDigit().foregroundStyle(.secondary) }
                         Slider(value: Binding(get: { Double(bitrateKbps) }, set: { bitrateKbps = Int($0 / 250) * 250 }),
                                in: 1000...9000, step: 250)
+                    }
+                    if ingestURL.lowercased().hasPrefix("srt://") {
+                        Stepper("SRT buffer \(srtLatencyMs) ms", value: $srtLatencyMs, in: 200...8000, step: 200)
                     }
                 } header: { Text("Ingest") } footer: {
                     Text((Self.hints[platform] ?? "") + "\nAuto picks H.264 for Kick and Twitch (they don't take HEVC) and passthrough elsewhere. H.264 re-encodes on the phone at the bitrate below; HEVC passthrough keeps the glasses' own bitrate.")

@@ -10,6 +10,7 @@ import MWDATCore
 import MWDATCamera
 import HaishinKit
 import RTMPHaishinKit
+import SRTHaishinKit
 
 struct Mic: Identifiable, Hashable { let id: String; let name: String }   // id = AVAudioSessionPortDescription.uid
 
@@ -170,8 +171,116 @@ final class Streamer: ObservableObject {
     private var thermalObserver: NSObjectProtocol?
     private var glassesThermalTask: Task<Void, Never>?
 
-    private let connection = RTMPConnection()          // advertises hvc1 in the enhanced-RTMP connect by default
-    private lazy var stream = RTMPStream(connection: connection)
+    // ponytail: an enum beats a protocol here. RTMPStream and SRTStream already share
+    // StreamConvertible for append/settings/bitrate and diverge only on connect/publish/close/
+    // connected, so four switches cost less than an abstraction over two actor types.
+    enum Uplink: Sendable {
+        case rtmp(RTMPConnection, RTMPStream)
+        case srt(SRTConnection, SRTStream)
+
+        static func make(for url: String) -> Uplink {
+            if url.lowercased().hasPrefix("srt://") {
+                let c = SRTConnection()
+                return .srt(c, SRTStream(connection: c))
+            }
+            let c = RTMPConnection()      // advertises hvc1 in the enhanced-RTMP connect by default
+            return .rtmp(c, RTMPStream(connection: c))
+        }
+
+        var isSRT: Bool { if case .srt = self { return true }; return false }
+
+        func connect(_ url: String) async throws {
+            switch self {
+            case .rtmp(let c, _): _ = try await c.connect(url)
+            case .srt(let c, _): try await c.connect(URL(string: url))   // SRT takes a URL, not a String
+            }
+        }
+
+        /// SRT has no publish name — the stream key rides in the URL's `streamid` query item.
+        func publish(_ key: String) async throws {
+            switch self {
+            case .rtmp(_, let st): _ = try await st.publish(key)
+            case .srt(_, let st): try await st.publish()
+            }
+        }
+
+        var connected: Bool {
+            get async {
+                switch self {
+                case .rtmp(let c, _): return await c.connected
+                case .srt(let c, _): return await c.connected
+                }
+            }
+        }
+
+        func close() async {
+            switch self {
+            case .rtmp(let c, _): try? await c.close()
+            case .srt(let c, _): await c.close()                         // SRT's close doesn't throw
+            }
+        }
+
+        func append(_ sb: CMSampleBuffer) async {
+            switch self {
+            case .rtmp(_, let st): await st.append(sb)
+            case .srt(_, let st): await st.append(sb)
+            }
+        }
+
+        func attach(to mixer: MediaMixer) async {
+            switch self {
+            case .rtmp(_, let st): await mixer.addOutput(st)
+            case .srt(_, let st): await mixer.addOutput(st)
+            }
+        }
+
+        func setBitRateStrategy(_ s: some StreamBitRateStrategy) async {
+            switch self {
+            case .rtmp(_, let st): await st.setBitRateStrategy(s)
+            case .srt(_, let st): await st.setBitRateStrategy(s)
+            }
+        }
+
+        var videoSettings: VideoCodecSettings {
+            get async {
+                switch self {
+                case .rtmp(_, let st): return await st.videoSettings
+                case .srt(_, let st): return await st.videoSettings
+                }
+            }
+        }
+
+        func setAudioSettings(_ a: AudioCodecSettings) async {
+            switch self {
+            case .rtmp(_, let st): try? await st.setAudioSettings(a)
+            case .srt(_, let st): try? await st.setAudioSettings(a)
+            }
+        }
+
+        /// RTMP-only diagnostic: every NetConnection.*/NetStream.* status the server sends.
+        /// SRT has no equivalent, so this simply returns for an SRT uplink.
+        func logStatus() async {
+            guard case .rtmp(let c, _) = self else { return }
+            for await st in await c.status { applog("stream", "rtmp status: \(st.code) \(st.description)") }
+        }
+
+        func setVideoSettings(_ v: VideoCodecSettings) async {
+            switch self {
+            case .rtmp(_, let st): try? await st.setVideoSettings(v)
+            case .srt(_, let st): try? await st.setVideoSettings(v)
+            }
+        }
+    }
+
+    /// libsrt defaults latency to ~120 ms, tuned for clean links; a phone walking through a city needs
+    /// far more buffer. Applied only if the user hasn't set it themselves in the URL.
+    static func withSRTLatency(_ url: String, ms: Int) -> String {
+        guard url.lowercased().hasPrefix("srt://"), !url.lowercased().contains("latency=") else { return url }
+        return url + (url.contains("?") ? "&" : "?") + "latency=\(ms)"
+    }
+
+    /// Rebuilt per goLive() from the ingest URL's scheme.
+    private var uplink = Uplink.make(for: "rtmp://")
     private let mixer = MediaMixer()
     private var mixerWired = false
 
@@ -179,7 +288,7 @@ final class Streamer: ObservableObject {
     private func wireMixer() async {
         guard !mixerWired else { return }
         mixerWired = true
-        await mixer.addOutput(stream)
+        await uplink.attach(to: mixer)
         await mixer.addOutput(sink)
         await mixer.startRunning()
     }
@@ -340,7 +449,7 @@ final class Streamer: ObservableObject {
                         self.evaluateSource()
                     }
                 })
-                let hot = self.hot, rtmp = self.stream
+                let hot = self.hot, up = self.uplink
                 tokens.append(camera.stream.videoFramePublisher.listen { frame in
                     // Runs on the SDK's thread. No main-actor hop: nothing here touches SwiftUI state.
                     let sb = frame.sampleBuffer
@@ -349,7 +458,7 @@ final class Streamer: ObservableObject {
                     if hot.forward, hot.live || hot.warm {
                         hot.sent += 1
                         if let t = hot.transcoder { t.decode(sb) }            // H.264 mode: decode → mixer → encoder
-                        else if hot.live { Task { await rtmp.append(sb) } }   // HEVC mode: passthrough, no encode
+                        else if hot.live { Task { await up.append(sb) } }     // HEVC mode: passthrough, no encode
                     }
                     if !hot.showMixerVideo, let preview = hot.preview {       // AVSampleBufferDisplayLayer is thread-safe
                         if preview.status == .failed { preview.flush() }
@@ -508,7 +617,12 @@ final class Streamer: ObservableObject {
     /// bitrateKbps applies to what HaishinKit encodes (phone camera, black frames); the glasses set their own HEVC bitrate.
     /// codec: "hevc" passes the glasses' stream through untouched (YouTube, Restream, own relay);
     /// "h264" decodes and re-encodes on the phone (Kick, Twitch without Affiliate). Phone-camera video follows the same choice.
-    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position, bitrateKbps: Int = 4000, codec: String = "hevc") {
+    func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position, bitrateKbps: Int = 4000, codec: String = "hevc", srtLatencyMs: Int = 2000) {
+        // Scheme picks the transport: srt:// goes out over SRT, everything else over RTMP(S).
+        // Rebuilt per session so switching ingest between streams doesn't need an app restart.
+        let url = Self.withSRTLatency(url, ms: srtLatencyMs)
+        uplink = Uplink.make(for: url)
+        applog("stream", "uplink = \(uplink.isSRT ? "srt" : "rtmp")")
         self.fallbackPosition = fallbackPosition
         let h264 = codec == "h264"
         // ponytail: adaptive bitrate's real gate is phoneEncodes ("is the phone doing the encoding"), not
@@ -531,7 +645,7 @@ final class Streamer: ObservableObject {
         // Installed regardless of codec: harmless telemetry-only capture (see QueueWatcher) even on a
         // session where phoneEncodes never goes true, and source/cameraOff can flip phoneEncodes mid-session
         // (glasses -> phone fallback) independent of the codec picked here.
-        Task { await stream.setBitRateStrategy(QueueWatcher(hot: hot)) }
+        Task { [up = uplink] in await up.setBitRateStrategy(QueueWatcher(hot: hot)) }
         if h264 {
             let mixer = self.mixer, hot = self.hot
             // Warm-up decodes to get the decoder synced to a keyframe, but nothing reaches the encoder until
@@ -568,7 +682,7 @@ final class Streamer: ObservableObject {
 
                 // profileLevel containing "HEVC" flips HaishinKit's internal format to .hevc (onMetaData codec id);
                 // the encoder handles phone-camera video, black frames and, in H.264 mode, the decoded glasses frames.
-                try? await stream.setVideoSettings(VideoCodecSettings(
+                await uplink.setVideoSettings(VideoCodecSettings(
                     videoSize: CGSize(width: 720, height: 1280),
                     bitRate: bitrateKbps * 1000,
                     profileLevel: (h264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel) as String,
@@ -588,19 +702,17 @@ final class Streamer: ObservableObject {
                     while hot.transcoder?.decoded == 0, waited < 80 { try await Task.sleep(for: .milliseconds(100)); waited += 1 }
                     applog("stream", "decoder warm after \(waited * 100) ms, decoded=\(hot.transcoder?.decoded ?? 0)")
                 }
-                try? await stream.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
+                await uplink.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
 
                 applog("stream", "connecting to \(url) key=\(key.count) chars, mic=\(micUID.isEmpty ? "default" : micUID), bitrate=\(bitrateKbps), codec=\(codec)")
                 Task { await Self.netProbe(url) }        // logs which interface iOS picks and whether the host answers on it
-                Task { [connection] in                       // every NetConnection.* / NetStream.* status the server sends
-                    for await st in await connection.status { applog("stream", "rtmp status: \(st.code) \(st.description)") }
-                }
+                Task { [up = uplink] in await up.logStatus() }   // RTMP server status lines; no-op on SRT
 
                 await superviseConnection(url: url, key: key)
             } catch {
                 applog("stream", "goLive setup failed: \(String(describing: error))", error: true)
                 rtmpState = error.localizedDescription
-                Task { try? await connection.close() }   // drop a half-open socket so the next attempt starts clean
+                Task { [up = uplink] in await up.close() }   // drop a half-open socket so the next attempt starts clean
             }
         }
     }
@@ -640,9 +752,9 @@ final class Streamer: ObservableObject {
         let ceiling = min(thermalCeilingKbps ?? bitrateCeilingKbps, bitrateCeilingKbps)
         let next = Self.steppedBitrate(current: currentBitrateKbps, up: up, ceilingKbps: max(ceiling, bitrateFloorKbps), floorKbps: bitrateFloorKbps)
         guard next != currentBitrateKbps else { return }
-        var vs = await stream.videoSettings
+        var vs = await uplink.videoSettings
         vs.bitRate = next * 1000
-        try? await stream.setVideoSettings(vs)
+        await uplink.setVideoSettings(vs)
         currentBitrateKbps = next
         lastBitrateAdjustAt = Date()
         applog("stream", "bitrate \(up ? "up" : "down") -> \(next) kbps (\(reason))")
@@ -663,7 +775,7 @@ final class Streamer: ObservableObject {
             do {
                 try await connectWithTimeout(url)
                 applog("stream", "connected, publishing")
-                _ = try await stream.publish(key)
+                try await uplink.publish(key)
 
                 let now = Date()
                 connectedSince = now
@@ -700,7 +812,7 @@ final class Streamer: ObservableObject {
 
             // ponytail: poll `connected` every 2 s instead of parsing RTMPConnection status codes for the drop
             // event — the status stream above is already logged separately for diagnostics.
-            while !Task.isCancelled, await connection.connected {
+            while !Task.isCancelled, await uplink.connected {
                 try? await Task.sleep(for: .seconds(2))
             }
             guard !Task.isCancelled else { return }
@@ -710,9 +822,9 @@ final class Streamer: ObservableObject {
 
     /// HaishinKit's own timeout doesn't always fire on a black-holed port; race the connect against a clock.
     private func connectWithTimeout(_ url: String) async throws {
-        let conn = connection
+        let up = uplink
         try await withThrowingTaskGroup(of: Void.self) { g in
-            g.addTask { _ = try await conn.connect(url) }
+            g.addTask { try await up.connect(url) }
             g.addTask { try await Task.sleep(for: .seconds(12)); throw NSError(domain: "MetaStream", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not reach \(URL(string: url)?.host ?? url) within 12 s"]) }
             try await g.next()
             g.cancelAll()
@@ -860,7 +972,7 @@ final class Streamer: ObservableObject {
         rtmpState = "stopped"
         Task {
             try? await mixer.attachVideo(nil)
-            try? await connection.close()
+            await uplink.close()
         }
         source = "glasses"
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [])   // mic off, PiP stays armed

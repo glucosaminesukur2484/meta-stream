@@ -57,11 +57,18 @@ struct ContentView: View {
     @AppStorage("fallbackCamera") var fallbackCamera = "back"
     @AppStorage("keepAwake") var keepAwake = true
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
+    @AppStorage("srtLatencyMs") var srtLatencyMs = 2000
     @AppStorage("codec") var codecPref = "auto"
     @AppStorage("platform") var platformPref = "kick"
     /// auto: only YouTube (enhanced RTMP) and custom servers take the glasses' HEVC untouched. Kick, Restream,
     /// Instagram and TikTok are H.264-only ingests, and Twitch gates HEVC behind Affiliate, so they get a transcode.
-    private var codec: String { codecPref == "auto" ? (["youtube", "custom"].contains(platformPref) ? "hevc" : "h264") : codecPref }
+    private var codec: String {
+        guard codecPref == "auto" else { return codecPref }
+        // SRT carries whatever the server decodes, and passthrough is the entire reason to use it:
+        // no transcode means no PiP window needed to keep streaming in the background.
+        if ingestURL.lowercased().hasPrefix("srt://") { return "hevc" }
+        return ["youtube", "custom"].contains(platformPref) ? "hevc" : "h264"
+    }
 
     @State private var showSettings = false
     @State private var showChat = false
@@ -284,7 +291,7 @@ struct ContentView: View {
                 } else {
                     streamer.goLive(url: ingestURL, key: streamKey, micUID: micUID,
                                     fallbackPosition: fallbackCamera == "front" ? .front : .back,
-                                    bitrateKbps: bitrateKbps, codec: codec)
+                                    bitrateKbps: bitrateKbps, codec: codec, srtLatencyMs: srtLatencyMs)
                 }
             } label: {
                 ZStack {
