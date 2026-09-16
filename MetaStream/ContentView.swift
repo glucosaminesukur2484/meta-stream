@@ -537,6 +537,8 @@ struct ContentView: View {
         }
     }
 
+    private func platformName(_ id: String) -> String { ["kick": "Kick", "twitch": "Twitch", "youtube": "YouTube"][id] ?? id }
+
     private func originBadge(_ origin: String) -> some View {
         let color: Color = origin == "twitch" ? .purple : origin == "youtube" ? .red : .green
         return Text(origin.isEmpty ? "?" : origin.prefix(1).uppercased())
@@ -578,7 +580,7 @@ struct ContentView: View {
         VStack(spacing: 8) {
             if sendTargets.count > 1 {
                 Picker("Send to", selection: $chatSite) {
-                    ForEach(sendTargets, id: \.self) { Text($0.capitalized).tag($0) }
+                    ForEach(sendTargets, id: \.self) { Text(platformName($0)).tag($0) }
                 }
                 .pickerStyle(.segmented)
             }
