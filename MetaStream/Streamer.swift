@@ -747,7 +747,7 @@ final class Streamer: ObservableObject {
                     expectedFrameRate: Float64(rate)))
                 if h264 {                                 // decoded frames need the mixer → encoder → stream path
                     await wireMixer()
-                    await mixer.screen.size = size         // offscreen rendering (blur) must output the geometry fixed above
+                    await Self.setScreenSize(mixer, to: size)   // offscreen rendering (blur) must output the geometry fixed above
                     var vm = await mixer.videoMixerSettings
                     vm.mainTrack = 0                       // track 0 straight through to the encoder
                     await mixer.setVideoMixerSettings(vm)
@@ -832,6 +832,11 @@ final class Streamer: ObservableObject {
     /// .passthrough skips Screen/VideoTrackScreenObject rendering entirely and forwards raw buffers straight
     /// to the encoder, which is why blur silently did nothing before this. Offscreen costs more (an extra
     /// render pass), so it's only switched on while blur is actually enabled.
+    /// `Screen` lives on HaishinKit's own global actor, so its size can't be assigned from the main actor.
+    @ScreenActor private static func setScreenSize(_ mixer: MediaMixer, to size: CGSize) {
+        mixer.screen.size = size
+    }
+
     private func syncBlurEffect() async {
         guard let privacy, privacy.enabled != blurEffectActive else { return }
         blurEffectActive = privacy.enabled
