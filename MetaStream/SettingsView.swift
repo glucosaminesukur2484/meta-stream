@@ -110,9 +110,7 @@ struct SettingsView: View {
                         Text("24").tag(24); Text("30").tag(30); Text("60").tag(60)
                     }
                 } header: { Text("Video (phone camera)") } footer: {
-                    Text("Used when the source pill is set to the back or front camera, so the app is fully useful without glasses. Fixed for the whole stream, because changing frame size mid-broadcast breaks players — set it before going live.
-
-Starting on the glasses pins the stream to 720×1280 at 30 fps even if the phone later takes over, so the picture stays one format end to end.")
+                    Text("Used when the source pill is set to the back or front camera, so the app is fully useful without glasses. Fixed for the whole stream, because changing frame size mid-broadcast breaks players — set it before going live.\n\nStarting on the glasses pins the stream to 720×1280 at 30 fps even if the phone later takes over, so the picture stays one format end to end.")
                 }
 
                 Section("Audio") {
