@@ -250,6 +250,20 @@ final class Streamer: ObservableObject {
             }
         }
 
+        func setAudioSettings(_ a: AudioCodecSettings) async {
+            switch self {
+            case .rtmp(_, let st): try? await st.setAudioSettings(a)
+            case .srt(_, let st): try? await st.setAudioSettings(a)
+            }
+        }
+
+        /// RTMP-only diagnostic: every NetConnection.*/NetStream.* status the server sends.
+        /// SRT has no equivalent, so this simply returns for an SRT uplink.
+        func logStatus() async {
+            guard case .rtmp(let c, _) = self else { return }
+            for await st in await c.status { applog("stream", "rtmp status: \(st.code) \(st.description)") }
+        }
+
         func setVideoSettings(_ v: VideoCodecSettings) async {
             switch self {
             case .rtmp(_, let st): try? await st.setVideoSettings(v)
@@ -688,13 +702,11 @@ final class Streamer: ObservableObject {
                     while hot.transcoder?.decoded == 0, waited < 80 { try await Task.sleep(for: .milliseconds(100)); waited += 1 }
                     applog("stream", "decoder warm after \(waited * 100) ms, decoded=\(hot.transcoder?.decoded ?? 0)")
                 }
-                try? await stream.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
+                await uplink.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
 
                 applog("stream", "connecting to \(url) key=\(key.count) chars, mic=\(micUID.isEmpty ? "default" : micUID), bitrate=\(bitrateKbps), codec=\(codec)")
                 Task { await Self.netProbe(url) }        // logs which interface iOS picks and whether the host answers on it
-                Task { [connection] in                       // every NetConnection.* / NetStream.* status the server sends
-                    for await st in await connection.status { applog("stream", "rtmp status: \(st.code) \(st.description)") }
-                }
+                Task { [up = uplink] in await up.logStatus() }   // RTMP server status lines; no-op on SRT
 
                 await superviseConnection(url: url, key: key)
             } catch {
