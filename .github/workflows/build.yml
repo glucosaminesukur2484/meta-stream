@@ -51,6 +51,10 @@ jobs:
           echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Installed profile '$NAME' ($UUID)"
 
+      - name: Self-checks
+        run: |
+          xcodebuild test             -project MetaStream.xcodeproj             -scheme MetaStream             -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16'             -skipPackagePluginValidation -skipMacroValidation             CODE_SIGNING_ALLOWED=NO
+
       - name: Archive (signed)
         run: |
           xcodebuild archive \
