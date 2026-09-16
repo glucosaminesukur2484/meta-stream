@@ -375,39 +375,64 @@ struct ContentView: View {
     /// pills can push them off the edge — you cannot scroll a pill row one-handed while walking.
     private var quickControls: some View {
         HStack(spacing: 12) {
-            quickButton("mic.slash.fill", "mic.fill", on: !streamer.muted, label: streamer.muted ? "Muted" : "Mic") {
+            quickButton(streamer.muted ? "mic.slash.fill" : "mic.fill",
+                        streamer.muted ? "Muted" : "Mic",
+                        style: streamer.muted ? .stopped : .live) {
                 streamer.setMuted(!streamer.muted)
             }
-            quickButton("video.slash.fill", "video.fill", on: !streamer.cameraOff, label: streamer.cameraOff ? "Hidden" : "Camera") {
+
+            quickButton(streamer.cameraOff ? "video.slash.fill" : "video.fill",
+                        streamer.cameraOff ? "Hidden" : "Camera",
+                        style: streamer.cameraOff ? .stopped : .live) {
                 streamer.setCameraOff(!streamer.cameraOff)
             }
-            // Amber "next stream" when blur is on but this session is passthrough: there is no decoded
-            // frame to obscure, so saying it is active would be a lie about a privacy feature.
-            quickButton("eye.slash.fill", "eye.fill", on: blurOn,
-                        pending: blurOn && streamer.live && !streamer.transcoding,
-                        label: blurOn ? (streamer.live && !streamer.transcoding ? "Next stream" : "Blur on") : "Blur off") {
+
+            quickButton(blurOn ? "eye.slash.fill" : "eye.fill",
+                        blurOn ? (streamer.live && !streamer.transcoding ? "Next stream" : "Blur on") : "Blur off",
+                        style: !blurOn ? .off : (streamer.live && !streamer.transcoding ? .pending : .protecting)) {
                 blurOn.toggle()
             }
         }
         .padding(.bottom, 10)
     }
 
-    private func quickButton(_ onIcon: String, _ offIcon: String, on: Bool, pending: Bool = false,
-                             label: String, action: @escaping () -> Void) -> some View {
+    /// One colour per meaning, never two shades of the same thing: green is going out, red is not going
+    /// out, blue is actively protecting, amber is asked for but not in effect, grey is off. A toggle you
+    /// have to squint at is useless at the moment you need it.
+    private enum QuickStyle {
+        case live, stopped, protecting, pending, off
+        var tint: Color? {
+            switch self {
+            case .live: return .green
+            case .stopped: return .red
+            case .protecting: return .blue
+            case .pending: return .orange
+            case .off: return nil
+            }
+        }
+    }
+
+    private func quickButton(_ icon: String, _ label: String, style: QuickStyle,
+                             action: @escaping () -> Void) -> some View {
         Button {
             tap(strong: true)
             action()
         } label: {
             VStack(spacing: 4) {
-                Image(systemName: on ? onIcon : offIcon)
-                    .font(.system(size: 20, weight: .semibold))
-                Text(label).font(.caption2.weight(.medium))
+                Image(systemName: icon).font(.system(size: 20, weight: .semibold))
+                Text(label).font(.caption2.weight(.semibold))
             }
-            .foregroundStyle(pending ? .black : (on ? .black : .white))
+            .foregroundStyle(.white)
             .frame(maxWidth: .infinity)
             .frame(height: 56)
-            .background(pending ? AnyShapeStyle(.orange) : (on ? AnyShapeStyle(.white) : AnyShapeStyle(.ultraThinMaterial)),
-                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(style.tint.map { AnyShapeStyle($0.gradient) } ?? AnyShapeStyle(.ultraThinMaterial))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(style.tint == nil ? 0.25 : 0), lineWidth: 1)
+            }
         }
         .buttonStyle(.plain)
     }
