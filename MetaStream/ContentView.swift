@@ -58,6 +58,9 @@ struct ContentView: View {
     @AppStorage("keepAwake") var keepAwake = true
     @AppStorage("bitrateKbps") var bitrateKbps = 4000
     @AppStorage("srtLatencyMs") var srtLatencyMs = 2000
+    @AppStorage("phoneHeight") var phoneHeight = 720
+    @AppStorage("phoneLandscape") var phoneLandscape = false
+    @AppStorage("phoneFps") var phoneFps = 30
     @AppStorage("codec") var codecPref = "auto"
     @AppStorage("platform") var platformPref = "kick"
     /// auto: only YouTube (enhanced RTMP) and custom servers take the glasses' HEVC untouched. Kick, Restream,
@@ -291,7 +294,8 @@ struct ContentView: View {
                 } else {
                     streamer.goLive(url: ingestURL, key: streamKey, micUID: micUID,
                                     fallbackPosition: fallbackCamera == "front" ? .front : .back,
-                                    bitrateKbps: bitrateKbps, codec: codec, srtLatencyMs: srtLatencyMs)
+                                    bitrateKbps: bitrateKbps, codec: codec, srtLatencyMs: srtLatencyMs,
+                                    quality: .init(height: phoneHeight, landscape: phoneLandscape, fps: phoneFps))
                 }
             } label: {
                 ZStack {
