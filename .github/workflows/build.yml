@@ -92,9 +92,11 @@ jobs:
       # which is exactly what happened chasing the stop-then-go-live crash. Encrypted like the IPA,
       # since they are only useful alongside it.
       - name: Package dSYMs
+        env:
+          IPA_PASSWORD: ${{ secrets.IPA_PASSWORD }}
         run: |
           (cd build/MetaStream.xcarchive && zip -qry "$GITHUB_WORKSPACE/build/MetaStream.dSYMs.zip" dSYMs)
-          openssl enc -aes-256-cbc -pbkdf2 -in build/MetaStream.dSYMs.zip             -out build/MetaStream.dSYMs.zip.enc -pass pass:'${{ secrets.IPA_PASSWORD }}'
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in build/MetaStream.dSYMs.zip             -out build/MetaStream.dSYMs.zip.enc -pass env:IPA_PASSWORD
 
       - uses: actions/upload-artifact@v7
         with:
