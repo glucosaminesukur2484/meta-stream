@@ -80,9 +80,6 @@ struct ContentView: View {
     @State private var chatText = ""
     @State private var atBottom = true   // tracks whether the chat list should auto-scroll on new messages
 
-    @AppStorage("restreamChatURL") var restreamChatURL = ""
-    @AppStorage("youtubeVideoID") var youtubeVideoID = ""
-
     /// True once at least one origin is set up to produce chat - Kick needs only a channel name, Twitch/
     /// YouTube need a connected account. Drives the sheet's "no chat source" empty state.
     private var chatConfigured: Bool {
