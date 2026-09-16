@@ -1,7 +1,6 @@
 import SwiftUI
 import MWDATCore
 import AVFoundation
-import WebKit
 
 // MARK: - UIKit bridges
 
@@ -22,24 +21,6 @@ struct PreviewView: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewUIView, context: Context) {}
 }
 
-struct ChatView: UIViewRepresentable {
-    let url: String
-    func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.allowsInlineMediaPlayback = true
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.isOpaque = false
-        webView.backgroundColor = .black
-        load(webView)
-        return webView
-    }
-    func updateUIView(_ uiView: WKWebView, context: Context) { load(uiView) }
-    private func load(_ webView: WKWebView) {
-        guard let u = URL(string: url), webView.url?.absoluteString != url else { return }
-        webView.load(URLRequest(url: u))
-    }
-}
-
 // MARK: - Live screen
 
 struct ContentView: View {
@@ -51,9 +32,11 @@ struct ContentView: View {
     @AppStorage("rtmpURL") var ingestURL = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     // ponytail: stream key in UserDefaults; move to Keychain if the phone is shared.
     @AppStorage("streamKey") var streamKey = ""
+    // Repurposed from "which platform's webview to show" (Phase 1a) to "which platform an outgoing chat
+    // message targets" now that the sheet shows one aggregated native list instead of a per-site webview.
     @AppStorage("chatSite") var chatSite = "kick"
-    // Which origins get read aloud. The chat SHEET still shows one site (chatSite); the voice feed
-    // aggregates, because you can't pick a tab while walking with the phone in your pocket.
+    // Which origins get read aloud AND shown in the chat list - the list is ChatFeed.recent verbatim,
+    // so a voice toggle being off means that platform's messages never arrive here either.
     @AppStorage("voiceKick") var voiceKick = true
     @AppStorage("voiceTwitch") var voiceTwitch = true
     @AppStorage("voiceYouTube") var voiceYouTube = true
@@ -93,24 +76,28 @@ struct ContentView: View {
     @State private var showStatus = false
     @State private var showManager = false
     @State private var photoFlash = false
+    @StateObject private var emotes = Emotes()
+    @State private var chatText = ""
+    @State private var atBottom = true   // tracks whether the chat list should auto-scroll on new messages
 
     @AppStorage("restreamChatURL") var restreamChatURL = ""
     @AppStorage("youtubeVideoID") var youtubeVideoID = ""
 
-    private var chatURL: String {
-        switch chatSite {
-        case "twitch": return "https://www.twitch.tv/popout/\(chatChannel)/chat"
-        case "youtube": return "https://www.youtube.com/live_chat?is_popout=1&v=\(youtubeVideoID)"
-        case "restream": return restreamChatURL
-        default: return "https://kick.com/popout/\(chatChannel)/chat"
-        }
-    }
+    /// True once at least one origin is set up to produce chat - Kick needs only a channel name, Twitch/
+    /// YouTube need a connected account. Drives the sheet's "no chat source" empty state.
     private var chatConfigured: Bool {
-        switch chatSite {
-        case "youtube": return !youtubeVideoID.isEmpty
-        case "restream": return !restreamChatURL.isEmpty
-        default: return !chatChannel.isEmpty
-        }
+        !chatChannel.isEmpty || platforms.twitchConnected || platforms.ytConnected
+    }
+
+    /// Platforms an outgoing message can actually go to right now - the segmented picker in the compose
+    /// bar only ever shows these, and `sendChat()` falls back to the first one if `chatSite` points at a
+    /// platform that isn't configured/connected.
+    private var sendTargets: [String] {
+        var targets: [String] = []
+        if !chatChannel.isEmpty { targets.append("kick") }
+        if platforms.twitchConnected { targets.append("twitch") }
+        if platforms.ytConnected { targets.append("youtube") }
+        return targets
     }
 
     var body: some View {
@@ -257,6 +244,7 @@ struct ContentView: View {
         if voiceYouTube, platforms.ytConnected { chat.startYouTube(platforms: platforms); origins += 1 } else { chat.stopYouTube() }
         // Only prefix "on Kick, …" when more than one origin is live — otherwise it's noise on every line.
         speaker.showOrigin = origins > 1
+        Task { await emotes.load(twitchLogin: platforms.twitchConnected ? platforms.twitchUser : nil) }
     }
 
     /// Shows what is actually on air, not what was asked for — on auto those differ whenever the
@@ -491,9 +479,132 @@ struct ContentView: View {
                 .padding()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ChatView(url: chatURL).ignoresSafeArea(edges: .bottom)
+                chatList
             }
         }
         .padding(.top, 8)
+    }
+
+    /// Native, aggregated chat: every origin ChatFeed is running lands in one list, newest at the bottom.
+    /// Auto-scrolls on new messages only while the user is already at the bottom — the onAppear/onDisappear
+    /// pair on the trailing anchor is "is the bottom on screen right now", no scroll-offset PreferenceKey
+    /// needed. Once the user scrolls up to read history, new messages stop yanking them back down.
+    private var chatList: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(chat.recent.enumerated()), id: \.offset) { _, event in
+                            chatRow(event)
+                        }
+                        Color.clear.frame(height: 1).id("bottom")
+                            .onAppear { atBottom = true }
+                            .onDisappear { atBottom = false }
+                    }
+                    .padding(.horizontal)
+                }
+                .onChange(of: chat.recent.count) { _, _ in
+                    guard atBottom else { return }
+                    withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
+                .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            composeBar
+        }
+    }
+
+    /// `.message` gets full weight — badge, username, message with inline emotes, legible size, generous
+    /// spacing for reading one-handed while walking. Everything else (tips/cheers/follows/subs/raids) is
+    /// already spoken aloud by Speaker, so it renders smaller and dimmer here — a glance, not a headline.
+    @ViewBuilder
+    private func chatRow(_ event: ChatEvent) -> some View {
+        if event.kind == .message {
+            HStack(alignment: .top, spacing: 10) {
+                originBadge(event.origin)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(event.user).font(.subheadline.weight(.semibold))
+                    messageText(event).font(.body)
+                }
+            }
+            .padding(.vertical, 10)
+        } else {
+            HStack(spacing: 8) {
+                originBadge(event.origin)
+                Text(eventSummary(event)).font(.footnote)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func originBadge(_ origin: String) -> some View {
+        let color: Color = origin == "twitch" ? .purple : origin == "youtube" ? .red : .green
+        return Text(origin.isEmpty ? "?" : origin.prefix(1).uppercased())
+            .font(.caption2.bold())
+            .frame(width: 20, height: 20)
+            .foregroundStyle(.white)
+            .background(color, in: Circle())
+    }
+
+    private func eventSummary(_ e: ChatEvent) -> String {
+        switch e.kind {
+        case .tip:
+            let amount = String(format: "%.2f", Double(e.amountCents) / 100)
+            return "\(e.user) tipped $\(amount)" + (e.text.isEmpty ? "" : " — \(e.text)")
+        case .cheer: return "\(e.user) cheered \(e.count) bits" + (e.text.isEmpty ? "" : " — \(e.text)")
+        case .follow: return "\(e.user) followed"
+        case .subscribe: return "\(e.user) subscribed"
+        case .raid: return "\(e.user) raided with \(e.count) viewers"
+        case .message: return e.text
+        }
+    }
+
+    /// Inline emotes via Text concatenation: `Text(Image(...))` is the only way to get an image flowing
+    /// inside wrapped text instead of breaking out as a separate view — AsyncImage can't sit inside a Text
+    /// run since it's a View, not an Image value. An emote still loading (`image(for:)` returns nil while
+    /// Emotes fetches and decodes it) renders as an empty run this pass; the row redraws once it lands.
+    private func messageText(_ event: ChatEvent) -> Text {
+        Emotes.tokenize(event.text, byName: emotes.byName).reduce(Text("")) { partial, run in
+            switch run {
+            case .text(let s): return partial + Text(s)
+            case .emote(let url):
+                if let img = emotes.image(for: url) { return partial + Text(img) }
+                return partial + Text("")
+            }
+        }
+    }
+
+    private var composeBar: some View {
+        VStack(spacing: 8) {
+            if sendTargets.count > 1 {
+                Picker("Send to", selection: $chatSite) {
+                    ForEach(sendTargets, id: \.self) { Text($0.capitalized).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            }
+            HStack(spacing: 10) {
+                TextField("Message", text: $chatText).textFieldStyle(.roundedBorder).onSubmit(sendChat)
+                Button(action: sendChat) { Image(systemName: "paperplane.fill") }
+                    .disabled(chatText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+    }
+
+    /// Targets whichever platform `chatSite` names, falling back to the first available one if it points
+    /// at something not currently configured/connected. Send methods are Platforms' own — this only routes.
+    private func sendChat() {
+        let text = chatText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let target = sendTargets.contains(chatSite) ? chatSite : (sendTargets.first ?? chatSite)
+        chatText = ""
+        Task {
+            switch target {
+            case "twitch": await platforms.twitchSend(text)
+            case "youtube": await platforms.ytSend(text)
+            default: await platforms.kickSend(text)
+            }
+        }
     }
 }
