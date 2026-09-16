@@ -37,11 +37,12 @@ import Vision
     nonisolated(unsafe) var options = Options()
     nonisolated(unsafe) var enabled = false   // off by default: blur is an opt-in cost (see the ADR)
 
-    nonisolated private static let detectEveryNFrames = 5              // ~6 detections/s at 30fps, well inside the 33ms/frame budget shared with decode+encode
+    nonisolated private static let detectEveryNFrames = 5
+    nonisolated private static let detectAtLeastEvery: TimeInterval = 0.4   // frame-count alone is meaningless when the render rate is low              // ~6 detections/s at 30fps, well inside the 33ms/frame budget shared with decode+encode
     nonisolated private static let detectionMaxDimension: CGFloat = 360 // boxes are normalized, so a small detection frame costs nothing downstream
     nonisolated private static let padFraction: CGFloat = 0.3           // generous margin: motion between detections is the risk, not one frame of under-blur
     nonisolated private static let pixellateScale: CGFloat = 24         // ponytail: fixed block size tuned for 720x1280; scale with frame size/box size if that ever looks wrong
-    nonisolated private static let detectStallThreshold: TimeInterval = 1.0
+    nonisolated private static let detectStallThreshold: TimeInterval = 3.0   // must exceed the detection interval below, or it alarms on itself
     nonisolated private static let boxCarryCeiling: TimeInterval = 5.0  // belt-and-suspenders: drop ancient boxes even if the caller never looks at `stalled`
     nonisolated private static let diagnosticLogInterval: TimeInterval = 1.0
 
@@ -66,7 +67,11 @@ import Vision
         let extent = image.extent
         guard extent.width > 0, extent.height > 0 else { return image }
 
-        if frameCount == 1 || frameCount % Self.detectEveryNFrames == 0 { runDetection(on: image) }
+        // Detect on frame count OR elapsed time: a low offscreen render rate makes "every 5th frame"
+        // arbitrarily slow, which is what made the stall alarm fire while detection was succeeding.
+        let due = frameCount == 1 || frameCount % Self.detectEveryNFrames == 0
+            || Date().timeIntervalSince(lastDetectionOK) >= Self.detectAtLeastEvery
+        if due { runDetection(on: image) }
         if Date().timeIntervalSince(lastDetectionOK) > Self.detectStallThreshold { setStalled(true) }
         if Date().timeIntervalSince(lastDetectionOK) > Self.boxCarryCeiling { boxes = [] }
 

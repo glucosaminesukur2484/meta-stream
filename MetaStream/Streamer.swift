@@ -313,6 +313,8 @@ final class Streamer: ObservableObject {
     static let glassesSize = CGSize(width: 720, height: 1280)
 
     private var phoneQuality = PhoneQuality()
+    /// Geometry the current session fixed at goLive, reused as the offscreen blur canvas.
+    private var sessionVideoSize = Streamer.glassesSize
 
     /// libsrt defaults latency to ~120 ms, tuned for clean links; a phone walking through a city needs
     /// far more buffer. Applied only if the user hasn't set it themselves in the URL.
@@ -738,6 +740,7 @@ final class Streamer: ObservableObject {
                 let onPhone = manualSource == "back" || manualSource == "front"
                 let size = onPhone ? phoneQuality.size : Self.glassesSize
                 let rate = onPhone ? phoneQuality.fps : 30
+                sessionVideoSize = size
                 applog("stream", "encoder \(Int(size.width))x\(Int(size.height)) @\(rate) (\(onPhone ? "phone" : "glasses"))")
                 await uplink.setVideoSettings(VideoCodecSettings(
                     videoSize: size,
@@ -833,6 +836,13 @@ final class Streamer: ObservableObject {
     /// to the encoder, which is why blur silently did nothing before this. Offscreen costs more (an extra
     /// render pass), so it's only switched on while blur is actually enabled.
     /// `Screen` lives on HaishinKit's own global actor, so its size can't be assigned from the main actor.
+    /// What the offscreen canvas should be right now: the session's fixed geometry while live, otherwise
+    /// whatever the phone camera is configured to produce, since that is the only thing the mixer renders
+    /// before GO LIVE.
+    private var blurCanvasSize: CGSize {
+        live ? sessionVideoSize : phoneQuality.size
+    }
+
     @ScreenActor private static func setScreenSize(_ mixer: MediaMixer, to size: CGSize) {
         mixer.screen.size = size
     }
@@ -841,6 +851,9 @@ final class Streamer: ObservableObject {
         guard let privacy, privacy.enabled != blurEffectActive else { return }
         blurEffectActive = privacy.enabled
         if blurEffectActive {
+            // Offscreen renders into Screen.size, which defaults to 1280x720 landscape. Without this a
+            // portrait frame gets fitted into a landscape canvas and the picture shrinks to a stamp.
+            await Self.setScreenSize(mixer, to: blurCanvasSize)
             _ = await mixer.screen.registerVideoEffect(privacy)
         } else {
             _ = await mixer.screen.unregisterVideoEffect(privacy)
