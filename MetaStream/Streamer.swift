@@ -62,12 +62,18 @@ private actor QueueWatcher: StreamBitRateStrategy {
     }
 }
 
-/// Mirrors the mixer's video (phone camera, black frames) into the same preview layer the glasses use,
-/// so one layer feeds the screen and Picture in Picture whatever the source is.
+/// Mirrors the mixer's video (phone camera, black frames, and -- while blur is on -- decoded glasses frames)
+/// into the same preview layer the glasses use, so one layer feeds the screen and Picture in Picture whatever
+/// the source is. videoTrackId == UInt8.max (not a specific track number) is deliberate: that's HaishinKit's
+/// sentinel for the mixer's final rendered/composited output -- the exact same tap RTMPStream/SRTStream use
+/// (checked HaishinKit 2.1.0 source: both default videoTrackId to UInt8.max) -- so this shows whatever
+/// actually goes out, effects included. A specific track number instead (e.g. 0) taps the RAW per-track
+/// input before Screen/effects ever see it, in every mixer mode; that was the bug that kept the local
+/// preview looking clean while blur silently did nothing to it.
 private final class LayerSink: MediaMixerOutput, @unchecked Sendable {
     private let hot: Hot
     init(hot: Hot) { self.hot = hot }
-    var videoTrackId: UInt8? { 0 }
+    var videoTrackId: UInt8? { UInt8.max }
     var audioTrackId: UInt8? { nil }
     func mixer(_ mixer: MediaMixer, didOutput sampleBuffer: CMSampleBuffer) {
         guard hot.showMixerVideo, let p = hot.preview else { return }
@@ -103,7 +109,15 @@ final class Streamer: ObservableObject {
 
     private func syncHot() {
         hot.forward = source == "glasses" && !cameraOff
-        let show = source == "phone" || cameraOff
+        // The glasses preview normally shows the raw HEVC stream directly (AVSampleBufferDisplayLayer decodes
+        // it itself -- lower latency than round-tripping through the mixer), but that raw stream can never be
+        // blurred: it never reaches the mixer (see the ADR). While glasses frames are actually being decoded
+        // (warm or live, H.264 mode) with blur on, route the preview through the mixer instead, same as phone
+        // camera/black frames, so the streamer sees what's actually going out rather than a clean picture that
+        // silently isn't what the audience gets. Called from goLive()/stopLive()/syncBlurEffect() too, since
+        // those flip the state this depends on without themselves being observed properties.
+        let glassesBlurredLive = hot.forward && hot.transcoder != nil && (hot.live || hot.warm) && (privacy?.enabled == true)
+        let show = source == "phone" || cameraOff || glassesBlurredLive
         if show != hot.showMixerVideo { hot.showMixerVideo = show; hot.preview?.flush() }   // format switches between sources
     }
     @Published var lastPhotoAt: Date?
@@ -741,6 +755,7 @@ final class Streamer: ObservableObject {
                     // Decode before connecting: an ingest that finds no video in its first seconds of probing
                     // treats the whole session as audio-only. Warm up, then connect with frames already flowing.
                     hot.warm = true
+                    syncHot()                              // glasses+blur: preview switches to the (blurred) mixer output now that decode is starting
                     rtmpState = "syncing decoder…"
                     var waited = 0
                     while hot.transcoder?.decoded == 0, waited < 80 { try await Task.sleep(for: .milliseconds(100)); waited += 1 }
@@ -829,6 +844,7 @@ final class Streamer: ObservableObject {
         vm.mode = blurEffectActive ? .offscreen : .passthrough
         await mixer.setVideoMixerSettings(vm)
         applog("stream", "privacy blur effect \(blurEffectActive ? "registered" : "unregistered"), mixer mode=\(vm.mode.rawValue)")
+        syncHot()   // re-evaluate whether the glasses preview should now route through the (blurred) mixer output
     }
 
     /// Blur failing open is worse than no blur, because the streamer is trusting it. When detection stalls
@@ -1052,6 +1068,7 @@ final class Streamer: ObservableObject {
         hot.warm = false
         hot.transcoder?.invalidate()
         hot.transcoder = nil
+        syncHot()   // decode stopped: glasses preview (if that's what routed it) falls back to the raw HEVC feed
         currentBitrateKbps = 0
         thermalCeilingKbps = nil
         cleanTicks = 0
