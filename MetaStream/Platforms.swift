@@ -40,7 +40,9 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     @Published private(set) var twitchScopes: Set<String> = []   // granted at last auth; see twitchHasScopes
     @Published var twitchAdNextAt: Date?          // nil until a schedule fetch succeeds (needs channel:read:ads)
     @Published var twitchAdSnoozeCount = 0
-    private var twitchUserID = ""
+    /// Fetched from an authenticated helix/users call. Readable so Emotes can ask 7TV/BTTV/FFZ for this
+    /// channel's sets without going round Twitch's undocumented web GQL for an ID we already hold.
+    private(set) var twitchUserID = ""
     // https://dev.twitch.tv/docs/api/reference/#get-content-classification-labels — the current valid CCL ids.
     static let twitchLabelIDs = ["DebatedSocialIssuesAndPolitics", "DrugsIntoxication", "SexualThemes", "ViolentGraphic", "Gambling", "ProfanityVulgarity"]
     // Read scopes the chat feed's EventSub subscriptions need, keyed by the feature name the UI shows.

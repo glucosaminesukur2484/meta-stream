@@ -29,8 +29,8 @@ final class Emotes: ObservableObject {
     /// Fetches every provider's global set, plus per-channel sets when `twitchLogin` is given and connected.
     /// No-ops if already loaded for this exact identity, so repeat calls from every `startChat()` re-run
     /// (voice toggle flips, channel edits) don't re-hit six APIs for nothing.
-    func load(twitchLogin: String?) async {
-        let key = twitchLogin?.lowercased() ?? ""
+    func load(twitchID: String?) async {
+        let key = twitchID ?? ""
         guard key != loadedFor else { return }
         loadedFor = key
 
@@ -42,7 +42,8 @@ final class Emotes: ObservableObject {
         for (name, url) in await bttvGlobal { map[name] = url }
         for (name, url) in await ffzGlobal { map[name] = url }
 
-        if !key.isEmpty, let id = await Self.twitchUserID(login: key) {
+        if !key.isEmpty {
+            let id = key
             async let sevenUser = Self.sevenTVUser(id: id)
             async let bttvUser = Self.bttvUser(id: id)
             async let ffzRoom = Self.ffzRoom(id: id)
@@ -132,33 +133,6 @@ final class Emotes: ObservableObject {
 
     // MARK: - Twitch login -> numeric ID
 
-    // ponytail: Twitch's own public web GQL client ID, same trick ChatFeed already uses for Kick's Pusher
-    // key - hardcoded by Twitch's own website and every community chat tool, no OAuth needed, no official
-    // docs. May rotate if Twitch changes its web client, in which case per-channel 7TV/BTTV/FFZ emotes
-    // silently stop resolving until this is updated (global sets are unaffected - they need no ID).
-    private static let twitchGQLClientID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
-
-    private static func twitchUserID(login: String) async -> String? {
-        guard let url = URL(string: "https://gql.twitch.tv/gql") else { return nil }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue(twitchGQLClientID, forHTTPHeaderField: "Client-Id")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [[String: Any]] = [[
-            "operationName": "UserId",
-            "query": "query UserId($login:String!){user(login:$login){id}}",
-            "variables": ["login": login],
-        ]]
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        guard let data = try? await URLSession.shared.data(for: req).0,
-              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let id = ((arr.first?["data"] as? [String: Any])?["user"] as? [String: Any])?["id"] as? String
-        else {
-            applog("chat", "twitch id lookup failed for \(login)", error: true)
-            return nil
-        }
-        return id
-    }
 
     // MARK: - 7TV
 
