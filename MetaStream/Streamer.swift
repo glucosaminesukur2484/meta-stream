@@ -358,6 +358,14 @@ final class Streamer: ObservableObject {
     /// The glasses' fixed output. Not configurable — see PhoneQuality.
     static let glassesSize = CGSize(width: 720, height: 1280)
 
+    /// Whether this build can talk to glasses at all. The Meta app ID is baked in at build time from the
+    /// META_APP_ID setting and is empty in a fork built without one -- someone streaming from the phone
+    /// camera should not be nagged to register hardware they do not have and could never register.
+    static let glassesConfigured: Bool = {
+        let mwdat = Bundle.main.object(forInfoDictionaryKey: "MWDAT") as? [String: Any]
+        return !((mwdat?["MetaAppID"] as? String ?? "").isEmpty)
+    }()
+
     /// Apple's "Action mode" is Camera-app branding for the extended cinematic algorithm; AVFoundation
     /// exposes it as a stabilisation mode on the capture connection. `.cinematicExtendedEnhanced` is the
     /// strongest and needs iOS 18, so anything older falls back to `.cinematicExtended`.
