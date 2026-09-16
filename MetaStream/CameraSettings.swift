@@ -263,6 +263,18 @@ extension CameraSettings {
         return CGPoint(x: Swift.min(Swift.max(x, 0), 1), y: Swift.min(Swift.max(y, 0), 1))
     }
 
+    /// maxAvailableVideoZoomFactor on modern hardware runs far past anything usable -- the top of that
+    /// range is pure digital upscaling that looks like mush. Apple's Camera app stops well short of it
+    /// (15x on this device; other models differ), and that practical ceiling is NOT exposed through any
+    /// API -- there is no "displayed max zoom" property to derive it from. So, like SettingsView's bitrate
+    /// ceilings and codec table, this is fixed, documented knowledge, not a queryable/derived value: one
+    /// named constant instead of a magic 15 scattered at each call site. An ADDITIONAL ceiling on top of
+    /// the device's own bounds, never a replacement -- min(device.maxAvailableVideoZoomFactor, this) still
+    /// lets a lower real ceiling win (front camera, single-lens hardware). Read by both CameraCapabilities.
+    /// probe below (what the slider/pinch range offers) and apply()'s clamp (what actually gets written),
+    /// so the two can never disagree -- see Self.demo().
+    static let maxUsableZoomFactor: Double = 15
+
     /// Applies every control this app exposes to `device`, gating each on the runtime support check
     /// Apple's docs specify (isXSupported/isXAvailable) so hardware that lacks a control is skipped and
     /// logged rather than silently doing nothing (isSmoothAutoFocusEnabled etc.) or throwing
@@ -283,7 +295,7 @@ extension CameraSettings {
         var applied: [String] = []
         var skipped: [String] = []
 
-        let zoom = clamped(s.zoom, min: device.minAvailableVideoZoomFactor, max: device.maxAvailableVideoZoomFactor)
+        let zoom = clamped(s.zoom, min: device.minAvailableVideoZoomFactor, max: min(device.maxAvailableVideoZoomFactor, maxUsableZoomFactor))
         device.videoZoomFactor = zoom
         applied.append("zoom=\(String(format: "%.2f", zoom))x")
 
@@ -394,7 +406,9 @@ struct CameraCapabilities {
         guard let device = CameraSettings.captureDevice(position: position) else { return nil }
         let f = device.activeFormat
         return CameraCapabilities(
-            zoomRange: device.minAvailableVideoZoomFactor...max(device.minAvailableVideoZoomFactor, device.maxAvailableVideoZoomFactor),
+            // Capped at maxUsableZoomFactor (see its doc) -- the slider and pinch gesture both read this
+            // range, so capping it here is what keeps them in agreement with apply()'s own clamp.
+            zoomRange: device.minAvailableVideoZoomFactor...max(device.minAvailableVideoZoomFactor, min(device.maxAvailableVideoZoomFactor, CameraSettings.maxUsableZoomFactor)),
             focusAuto: device.isFocusModeSupported(.autoFocus),
             focusContinuous: device.isFocusModeSupported(.continuousAutoFocus),
             focusManual: device.isLockingFocusWithCustomLensPositionSupported,
@@ -613,6 +627,15 @@ extension CameraSettings {
         // clamp against the device's own floor, never an assumed 1.0.
         assert(clamped(0.5, min: 0.5, max: 10.0) == 0.5, "ultra-wide's switch-over sits at the virtual device's real (below-1.0) floor")
         assert(clamped(0.2, min: 0.5, max: 10.0) == 0.5, "a request below that floor still clamps to it, not to 1.0")
+
+        // maxUsableZoomFactor (15): a deliberate ceiling on top of the device's own max, never a
+        // replacement -- min(deviceMax, maxUsableZoomFactor) must win when the device claims higher, but
+        // never raise a device whose real max is already lower. Same formula apply() and
+        // CameraCapabilities.probe use for the zoom clamp/slider-pinch range, so this proves both agree.
+        assert(min(100.0, maxUsableZoomFactor) == 15, "a device claiming a huge max (100) still caps at 15")
+        assert(min(6.0, maxUsableZoomFactor) == 6, "a device whose real max (6) is already below 15 is never raised")
+        assert(clamped(20, min: 1, max: min(100.0, maxUsableZoomFactor)) == 15, "apply()'s clamp: requesting past the cap lands at 15, not the device's own 100")
+        assert(clamped(20, min: 1, max: min(6.0, maxUsableZoomFactor)) == 6, "apply()'s clamp: a lower device ceiling still wins")
 
         print("CameraSettings.demo() ok")
     }
