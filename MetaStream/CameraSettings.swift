@@ -100,6 +100,16 @@ extension CameraSettings {
         return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
     }
 
+    /// Which of the three lenses physically exist at `position` -- CameraLens.allCases filtered by
+    /// DiscoverySession actually finding a match, NOT device(lens:position:)'s fallback-to-wide (that
+    /// fallback is right for a caller already committed to one lens; here we want the honest list so the
+    /// live lens-switch strip never offers a lens that would silently become wide when tapped).
+    static func availableLenses(position: AVCaptureDevice.Position) -> [CameraLens] {
+        CameraLens.allCases.filter {
+            AVCaptureDevice.DiscoverySession(deviceTypes: [$0.deviceType], mediaType: .video, position: position).devices.first != nil
+        }
+    }
+
     // MARK: pure clamps -- see Self.demo(). One generic clamp for zoom/ISO/bias/lens-position/torch (all
     // "keep a requested Double in range"); ms->s is the one conversion, kept separate. apply(_:to:) below
     // calls these exact functions, so the self-check exercises production logic, not a parallel copy.
@@ -114,6 +124,36 @@ extension CameraSettings {
         return .init(redGain: c(g.redGain), greenGain: c(g.greenGain), blueGain: c(g.blueGain))
     }
 
+    /// Maps a tap point normalized to the PREVIEW VIEW's own bounds (0...1, origin top-left -- what you get
+    /// dividing a SwiftUI tap location by the view's size) into AVCaptureDevice.focusPointOfInterest /
+    /// exposurePointOfInterest space. Apple defines that space as FIXED to the sensor's natural landscape
+    /// orientation regardless of the video orientation the capture connection is rotating to -- NOT the
+    /// same space as the point you tapped on screen. AVCaptureVideoPreviewLayer.captureDevicePointConverted(
+    /// fromLayerPoint:) does this conversion for free, but this app's live preview is an
+    /// AVSampleBufferDisplayLayer (shared with the glasses' raw HEVC feed, see ContentView's PreviewView),
+    /// not an AVCaptureVideoPreviewLayer, so that convenience API isn't reachable here -- these are the same
+    /// four 90-degree-rotation cases it computes internally, hand-rolled.
+    /// mirrored flips the x axis afterward, for the front camera when Settings' "Mirror" output toggle is on.
+    /// ponytail: does NOT correct for .resizeAspect letterbox/pillarbox between the view's aspect ratio and
+    /// the captured video's -- assumes the tap point lines up with the video pixel at that fraction of the
+    /// view, which is only exact when they share an aspect ratio (close but not exact for 720x1280 on a
+    /// ~19.5:9 screen). Upgrade path: pass the actual output size in and clip/rescale against the letterboxed
+    /// rect before rotating. Also NOT verified against real camera hardware (no device available here) --
+    /// this is the standard published mapping, but the mirrored front-camera case especially is worth
+    /// confirming against one real tap before trusting it blind.
+    static func devicePoint(forViewPoint p: CGPoint, orientation: AVCaptureVideoOrientation, mirrored: Bool) -> CGPoint {
+        var x: CGFloat, y: CGFloat
+        switch orientation {
+        case .portrait:           x = p.y;     y = 1 - p.x
+        case .portraitUpsideDown: x = 1 - p.y; y = p.x
+        case .landscapeRight:     x = p.x;     y = p.y
+        case .landscapeLeft:      x = 1 - p.x; y = 1 - p.y
+        @unknown default:         x = p.x;     y = p.y
+        }
+        if mirrored { x = 1 - x }
+        return CGPoint(x: Swift.min(Swift.max(x, 0), 1), y: Swift.min(Swift.max(y, 0), 1))
+    }
+
     /// Applies every control this app exposes to `device`, gating each on the runtime support check
     /// Apple's docs specify (isXSupported/isXAvailable) so hardware that lacks a control is skipped and
     /// logged rather than silently doing nothing (isSmoothAutoFocusEnabled etc.) or throwing
@@ -121,7 +161,11 @@ extension CameraSettings {
     /// pair -- every setter below requires the device to already be locked or it raises NSGenericException
     /// (documented on AVCaptureDevice, confirmed directly on setTorchModeOn(level:)) -- so it's safe to call
     /// from inside Streamer's attachVideo configuration closure without that closure locking separately.
-    static func apply(_ s: CameraSettings, to device: AVCaptureDevice) {
+    /// `log: false` skips the applog call at the bottom only -- every device write below still runs every
+    /// call. Streamer.applyCameraSettings() passes false because it's called on every live-slider tick and
+    /// LogStore.add() rejoins up to 2000 lines on every call (see Log.swift); paying that during a fast drag
+    /// would be felt as lag even though the actual camera writes are cheap.
+    static func apply(_ s: CameraSettings, to device: AVCaptureDevice, log: Bool = true) {
         do { try device.lockForConfiguration() } catch {
             applog("stream", "camera settings: lockForConfiguration failed: \(error.localizedDescription)", error: true)
             return
@@ -208,8 +252,10 @@ extension CameraSettings {
             applied.append("gdc=\(s.geometricDistortionCorrection)")
         } else { skipped.append("geometric distortion correction") }
 
-        applog("stream", "camera settings: \(applied.joined(separator: " "))"
-            + (skipped.isEmpty ? "" : " -- unsupported on this camera, skipped: \(skipped.joined(separator: ", "))"))
+        if log {
+            applog("stream", "camera settings: \(applied.joined(separator: " "))"
+                + (skipped.isEmpty ? "" : " -- unsupported on this camera, skipped: \(skipped.joined(separator: ", "))"))
+        }
     }
 }
 
@@ -254,6 +300,28 @@ struct CameraCapabilities {
     }
 }
 
+/// One entry in the live control strip ContentView opens over the preview (see ContentView's
+/// cameraControlStrip). Tap-to-focus/expose is deliberately not a case here -- it's a gesture directly on
+/// the preview, not a strip button (see Streamer.tapToFocus). Membership and order are user-configurable
+/// (Settings gets the picker UI separately); ContentView renders `LiveCameraControl.order(from:)`'s result
+/// rather than a hardcoded HStack, so adding/removing/reordering entries there needs no ContentView change.
+enum LiveCameraControl: String, CaseIterable {
+    case lens, zoom, exposure, torch, whiteBalanceLock
+
+    static let storageKey = "liveCameraControlOrder"
+    static let defaultOrder: [LiveCameraControl] = [.lens, .zoom, .exposure, .torch, .whiteBalanceLock]
+    static let defaultOrderRaw = defaultOrder.map(\.rawValue).joined(separator: ",")
+
+    /// Pure parse: comma-joined rawValues (UserDefaults.standard[storageKey]) -> ordered cases. Unknown
+    /// tokens (a future rename, a stale value from an older build) are dropped rather than crashing the
+    /// strip; an empty string or one that parses to nothing falls back to defaultOrder so there's never a
+    /// stored value that leaves the strip with no way to bring controls back. See Self.demo() below.
+    static func order(from raw: String) -> [LiveCameraControl] {
+        let parsed = raw.split(separator: ",").compactMap { LiveCameraControl(rawValue: $0.trimmingCharacters(in: .whitespaces)) }
+        return parsed.isEmpty ? defaultOrder : parsed
+    }
+}
+
 #if DEBUG
 extension CameraSettings {
     /// Self-check for the pure conversions -- no device, no capture session.
@@ -270,6 +338,23 @@ extension CameraSettings {
         let gains = AVCaptureDevice.WhiteBalanceGains(redGain: 10, greenGain: 0.1, blueGain: 3)
         let gainsClamped = clampedGains(gains, max: 4)
         assert(gainsClamped.redGain == 4 && gainsClamped.greenGain == 1 && gainsClamped.blueGain == 3, "WB gains clamp to [1, maxGain]")
+
+        // devicePoint: a tap at the view's top-left, each orientation, unmirrored.
+        let tl = CGPoint(x: 0, y: 0)
+        assert(devicePoint(forViewPoint: tl, orientation: .portrait, mirrored: false) == CGPoint(x: 0, y: 1), "portrait top-left")
+        assert(devicePoint(forViewPoint: tl, orientation: .portraitUpsideDown, mirrored: false) == CGPoint(x: 1, y: 0), "portraitUpsideDown top-left")
+        assert(devicePoint(forViewPoint: tl, orientation: .landscapeRight, mirrored: false) == CGPoint(x: 0, y: 0), "landscapeRight top-left")
+        assert(devicePoint(forViewPoint: tl, orientation: .landscapeLeft, mirrored: false) == CGPoint(x: 1, y: 1), "landscapeLeft top-left")
+        assert(devicePoint(forViewPoint: tl, orientation: .portrait, mirrored: true) == CGPoint(x: 1, y: 1), "mirrored flips x")
+        let center = CGPoint(x: 0.5, y: 0.5)
+        assert(devicePoint(forViewPoint: center, orientation: .portrait, mirrored: false) == CGPoint(x: 0.5, y: 0.5), "center maps to center in every orientation")
+
+        // LiveCameraControl.order(from:): valid, unknown-token-dropping, and fallback cases.
+        assert(LiveCameraControl.order(from: "zoom,torch") == [.zoom, .torch], "valid order parses in place")
+        assert(LiveCameraControl.order(from: "zoom,bogus,torch") == [.zoom, .torch], "unknown tokens dropped")
+        assert(LiveCameraControl.order(from: "") == LiveCameraControl.defaultOrder, "empty falls back to default")
+        assert(LiveCameraControl.order(from: "nope,also-nope") == LiveCameraControl.defaultOrder, "all-unknown falls back to default")
+
         print("CameraSettings.demo() ok")
     }
 }

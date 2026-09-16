@@ -58,6 +58,17 @@ struct ContentView: View {
     @AppStorage("phoneStabilization") var phoneStabilization = "off"
     @AppStorage("codec") var codecPref = "auto"
     @AppStorage("platform") var platformPref = "kick"
+
+    // Live camera controls -- same keys SettingsView's Camera screen writes, so the two views never
+    // disagree about the current value (see CameraSettings.loadFromDefaults()).
+    @AppStorage("camLens") var camLens = "wide"
+    @AppStorage("camZoom") var camZoom = 1.0
+    @AppStorage("camExposureManual") var camExposureManual = false
+    @AppStorage("camExposureBiasEV") var camExposureBiasEV = 0.0
+    @AppStorage("camTorchLevel") var camTorchLevel = 0.0
+    @AppStorage("camWhiteBalanceManual") var camWhiteBalanceManual = false
+    @AppStorage("camMirrored") var camMirrored = false
+    @AppStorage(LiveCameraControl.storageKey) var liveControlOrderRaw = LiveCameraControl.defaultOrderRaw
     /// auto: only YouTube (enhanced RTMP) and custom servers take the glasses' HEVC untouched. Kick, Restream,
     /// Instagram and TikTok are H.264-only ingests, and Twitch gates HEVC behind Affiliate, so they get a transcode.
     private var codec: String {
@@ -76,10 +87,16 @@ struct ContentView: View {
     @State private var showChat = false
     @State private var showStatus = false
     @State private var showManager = false
+    @State private var showCameraControls = false
     @State private var photoFlash = false
     @StateObject private var emotes = Emotes()
     @State private var chatText = ""
     @State private var atBottom = true   // tracks whether the chat list should auto-scroll on new messages
+    @State private var focusTap: CGPoint?   // raw view coords of the last tap-to-focus, for the square indicator
+
+    /// Data-driven strip contents: see LiveCameraControl's doc. Falls back to the full default set if the
+    /// stored value is empty or unparseable, so there's never a dead strip with nothing shown.
+    private var liveControlOrder: [LiveCameraControl] { LiveCameraControl.order(from: liveControlOrderRaw) }
 
     /// True once at least one origin is set up to produce chat - Kick needs only a channel name, Twitch/
     /// YouTube need a connected account. Drives the sheet's "no chat source" empty state.
@@ -101,7 +118,31 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            PreviewView().ignoresSafeArea()      // one layer for glasses, phone camera and black frames; PiP uses it too
+            GeometryReader { geo in
+                // Tap-to-focus/expose, phone source only -- see Streamer.tapToFocus's doc. A gesture, not a
+                // strip control (per CameraSettings.LiveCameraControl's doc), so it works whether or not the
+                // strip below is open.
+                PreviewView().ignoresSafeArea()      // one layer for glasses, phone camera and black frames; PiP uses it too
+                    .contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { value in
+                        guard streamer.source == "phone" else { return }
+                        tap()
+                        focusTap = value.location
+                        let norm = CGPoint(x: value.location.x / max(geo.size.width, 1), y: value.location.y / max(geo.size.height, 1))
+                        let orientation: AVCaptureVideoOrientation = phoneLandscape ? .landscapeRight : .portrait
+                        streamer.tapToFocus(at: CameraSettings.devicePoint(forViewPoint: norm, orientation: orientation, mirrored: camMirrored))
+                        Task { try? await Task.sleep(for: .milliseconds(700)); withAnimation { focusTap = nil } }
+                    })
+            }
+            .ignoresSafeArea()
+
+            if let p = focusTap {
+                RoundedRectangle(cornerRadius: 4).stroke(Color.yellow, lineWidth: 1.5)
+                    .frame(width: 70, height: 70)
+                    .position(p)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
 
             if streamer.cameraOff {
                 VStack(spacing: 8) {
@@ -124,6 +165,17 @@ struct ContentView: View {
 
             if photoFlash {
                 Color.white.ignoresSafeArea().transition(.opacity)
+            }
+
+            // Trailing edge, vertically centered: stays clear of the HUD row (top), GO LIVE and the rest of
+            // `controls` (bottom), and the preview centre, while staying thumb-reachable one-handed. Only
+            // meaningful with the phone camera live -- the glasses expose none of this.
+            if showCameraControls, streamer.source == "phone" {
+                HStack {
+                    Spacer()
+                    cameraControlStrip.padding(.trailing, 10)
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .preferredColorScheme(.dark)
@@ -156,6 +208,8 @@ struct ContentView: View {
         .onChange(of: voiceYouTube) { _, _ in startChat() }
         .onChange(of: platforms.twitchConnected) { _, _ in startChat() }
         .onChange(of: platforms.ytConnected) { _, _ in startChat() }
+        // Glasses (re)connecting can flip the source out from under an open strip -- nothing left to control.
+        .onChange(of: streamer.source) { _, s in if s != "phone" { showCameraControls = false } }
         .onAppear { UIApplication.shared.isIdleTimerDisabled = keepAwake }
         .onChange(of: keepAwake) { _, v in UIApplication.shared.isIdleTimerDisabled = v }
         .onChange(of: streamer.lastPhotoAt) { _, _ in
@@ -221,6 +275,12 @@ struct ContentView: View {
                     pill("slider.horizontal.3", "manage", .cyan)
                 }
                 .buttonStyle(.plain)
+                if streamer.source == "phone" {
+                    Button { tap(); showCameraControls.toggle() } label: {
+                        pill("camera.aperture", "cam", showCameraControls ? .cyan : .white)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
         .padding(.top, 4)
@@ -433,6 +493,114 @@ struct ContentView: View {
                 .background(filled ? AnyShapeStyle(.white) : AnyShapeStyle(.ultraThinMaterial), in: Circle())
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: Live camera control strip -- "set before you walk" controls live in SettingsView's Camera
+    // screen (ISO, shutter, HDR, distortion correction: deliberate, set-once). These are the ones worth
+    // changing mid-stream, applied straight to the live device -- see Streamer.applyCameraSettings.
+
+    private var cameraControlStrip: some View {
+        VStack(spacing: 14) {
+            ForEach(liveControlOrder, id: \.self) { liveControlRow($0) }
+        }
+        .padding(12)
+        .frame(width: 156)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    @ViewBuilder
+    private func liveControlRow(_ control: LiveCameraControl) -> some View {
+        let cap = streamer.cameraCapabilities
+        switch control {
+        case .lens:
+            // "0.5x / 1x / 2x style, like the Camera app" -- shown only if this position actually has more
+            // than one, and only the lenses it actually has (CameraSettings.availableLenses, not
+            // device(lens:)'s silent fallback-to-wide). streamer.cameraPosition, not the fallbackCamera
+            // AppStorage preference -- setSource("front"/"back") can diverge from it, see that property's doc.
+            let lenses = CameraSettings.availableLenses(position: streamer.cameraPosition)
+            if lenses.count > 1 {
+                HStack(spacing: 6) {
+                    ForEach(lenses, id: \.rawValue) { lens in
+                        Button {
+                            tap()
+                            camLens = lens.rawValue
+                            streamer.switchLens(lens.rawValue)
+                        } label: {
+                            Text(lensShort(lens))
+                                .font(.caption2.weight(.bold))
+                                .frame(width: 30, height: 30)
+                                .foregroundStyle(camLens == lens.rawValue ? .black : .white)
+                                .background(camLens == lens.rawValue ? AnyShapeStyle(.white) : AnyShapeStyle(.white.opacity(0.15)), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        case .zoom:
+            if let range = cap?.zoomRange, range.upperBound > range.lowerBound {
+                liveSlider("magnifyingglass", String(format: "%.1fx", camZoom), $camZoom, range)
+            }
+        case .exposure:
+            if let range = cap?.exposureBiasRange {
+                VStack(alignment: .leading, spacing: 2) {
+                    liveSlider("sun.max", String(format: "%.1f EV", camExposureBiasEV), $camExposureBiasEV, range, disabled: camExposureManual)
+                    // Bias only affects auto exposure -- custom ISO/shutter ignores it (see CameraSettings'
+                    // type doc). Disabled rather than force-flipping the user's Settings choice.
+                    if camExposureManual {
+                        Text("manual exposure on").font(.system(size: 9)).foregroundStyle(.orange)
+                    }
+                }
+            }
+        case .torch:
+            if cap?.torch == true {
+                liveSlider("flashlight.on.fill", camTorchLevel <= 0 ? "off" : String(format: "%.0f%%", camTorchLevel * 100), $camTorchLevel, 0...1)
+            }
+        case .whiteBalanceLock:
+            if cap?.whiteBalanceManual == true {
+                Button {
+                    tap()
+                    camWhiteBalanceManual.toggle()
+                    streamer.setWhiteBalanceLocked(camWhiteBalanceManual)
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: camWhiteBalanceManual ? "lock.fill" : "lock.open")
+                        Text(camWhiteBalanceManual ? "WB locked" : "Lock WB").font(.caption2)
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .background(camWhiteBalanceManual ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(.white.opacity(0.15)), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    /// Fires on every value change, not just release -- SwiftUI's Slider already updates a plain
+    /// Binding<Double> continuously while dragging, so this is what makes the picture change under your
+    /// finger like the Camera app (see Streamer.applyCameraSettings's doc for why no further debounce).
+    private func liveSlider(_ icon: String, _ label: String, _ value: Binding<Double>, _ range: ClosedRange<Double>, disabled: Bool = false) -> some View {
+        VStack(spacing: 2) {
+            HStack {
+                Image(systemName: icon).font(.caption2)
+                Text(label).font(.caption2.monospacedDigit())
+                Spacer()
+            }
+            .foregroundStyle(.white)
+            Slider(value: value, in: range)
+                .tint(.white)
+                .onChange(of: value.wrappedValue) { _, _ in streamer.applyCameraSettings() }
+        }
+        .opacity(disabled ? 0.4 : 1)
+        .disabled(disabled)
+    }
+
+    private func lensShort(_ lens: CameraLens) -> String {
+        switch lens {
+        case .ultrawide: return "0.5"
+        case .wide: return "1"
+        case .telephoto: return "2"
+        }
     }
 
     private func tap(strong: Bool = false) {

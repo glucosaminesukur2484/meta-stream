@@ -166,6 +166,24 @@ final class Streamer: ObservableObject {
         set { hot.preview = newValue }
     }
 
+    /// The phone camera physically attached to the mixer right now -- nil whenever glasses or black frames
+    /// are the source. Set after switchTo(glasses:)'s phone branch attaches (post-await, so this runs back
+    /// on the main actor -- no isolation ambiguity with the attachVideo configuration closure itself), and
+    /// cleared at every other mixer.attachVideo(nil) call site (switchTo's glasses branch, setCameraOff,
+    /// stopLive). Live sliders patch THIS device in place via applyCameraSettings() below instead of
+    /// re-attaching -- re-attaching per slider tick would visibly glitch the preview, and live, the outgoing
+    /// stream, many times a second.
+    private(set) var cameraDevice: AVCaptureDevice?
+    /// What the live control strip can offer for the currently attached device -- the same struct/probe
+    /// SettingsView's Camera screen uses (CameraCapabilities.probe), refreshed on every attach so front/back
+    /// and lens differences show up immediately instead of stale-showing whatever the last camera supported.
+    @Published private(set) var cameraCapabilities: CameraCapabilities?
+    /// Mirrors fallbackPosition (private, below) for the live strip's lens filter -- setSource("front"/"back")
+    /// can change the real attached position without touching @AppStorage("fallbackCamera") at all (that key
+    /// is only Settings' fallback *preference*, read at evaluateSource() time), so the strip needs this
+    /// rather than reading that AppStorage key directly and risking a stale/wrong lens list.
+    @Published private(set) var cameraPosition: AVCaptureDevice.Position = .back
+
     private let hot = Hot()
     private lazy var sink = LayerSink(hot: hot)
     var pip: PiPController?                        // owned here so it outlives SwiftUI view rebuilds
@@ -640,6 +658,8 @@ final class Streamer: ObservableObject {
             if glasses {
                 try await mixer.attachVideo(nil)
                 source = "glasses"
+                cameraDevice = nil
+                cameraCapabilities = nil
             } else {
                 // Encoded by HaishinKit in whatever geometry goLive fixed for this session, so the outgoing
                 // stream never changes format even when the source switches. Phone capture pauses in the
@@ -660,6 +680,12 @@ final class Streamer: ObservableObject {
                 }
                 if mode != .off { applog("stream", "stabilization requested: \(phoneQuality.stabilization)") }
                 applog("stream", "camera lens=\(camSettings.lens) position=\(fallbackPosition == .front ? "front" : "back")")
+                // ponytail: re-acquire rather than reuse `cam`. Swift 6 region isolation treats `cam` as
+                // sent once it crosses into the mixer's domain, so touching it again here is a data race by
+                // construction. AVCaptureDevice.default returns the same underlying device anyway.
+                cameraDevice = CameraSettings.device(lens: camSettings.lens, position: fallbackPosition)
+                cameraCapabilities = CameraCapabilities.probe(lens: camSettings.lens, position: fallbackPosition)
+                cameraPosition = fallbackPosition
                 try? await mixer.setFrameRate(Float64(phoneQuality.fps))
                 await mixer.setVideoOrientation(phoneQuality.landscape ? .landscapeRight : .portrait)
                 source = "phone"
@@ -667,6 +693,80 @@ final class Streamer: ObservableObject {
         } catch {
             rtmpState = "camera switch: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: live camera controls (phone only -- see cameraDevice's doc)
+
+    /// Re-applies every phone camera setting to the already-attached device via lockForConfiguration(),
+    /// instead of re-attaching -- see cameraDevice's doc above. Bound to every live slider's onChange, not
+    /// debounced: SwiftUI already delivers those at ~display rate, so calling this on every one already
+    /// reads as immediate (this is the Camera app's own feel -- the picture changes under your finger while
+    /// dragging, not on release), and a timer-based coalesce on top would only be felt as lag. `log: false`
+    /// is the one concession -- see CameraSettings.apply's doc -- and costs nothing in device writes.
+    func applyCameraSettings() {
+        guard let device = cameraDevice else { return }
+        CameraSettings.apply(CameraSettings.loadFromDefaults(), to: device, log: false)
+    }
+
+    /// Lens is a different physical AVCaptureDevice, not a settable property on the one we're holding (see
+    /// CameraSettings' type doc) -- switching it re-attaches the phone camera through the normal switchTo
+    /// path, same mechanism as a front/back switch. A brief reattach glitch is fine for a discrete tap (the
+    /// Camera app's own lens switch isn't seamless either); applyCameraSettings() above exists specifically
+    /// so the continuous sliders never have to pay that cost per tick.
+    func switchLens(_ lens: String) {
+        guard source == "phone" else { return }
+        UserDefaults.standard.set(lens, forKey: "camLens")
+        Task { await switchTo(glasses: false) }
+    }
+
+    /// Live "lock" reads whatever continuous auto white balance has already converged to right now and
+    /// freezes there -- more useful mid-walk than picking a Kelvin value blind (see CameraSettings' type
+    /// doc). Converts the sampled gains back to temperature/tint (temperatureAndTintValues(for:) is
+    /// deviceWhiteBalanceGains(for:)'s documented inverse -- that forward direction is already used in
+    /// CameraSettings.apply above) and writes through the exact camWBTemperature/camWBTint/
+    /// camWhiteBalanceManual keys Settings' numeric fields use -- one source of truth, not a second
+    /// locked-gains key -- then reapplies through the normal coalesced path. CameraSettings.apply()
+    /// recomputes gains FROM those written values, which round-trips to (imperceptibly) the same lock
+    /// rather than the exact gains sampled here; that's the trade for reusing one apply path instead of a
+    /// bespoke lockForConfiguration call here too.
+    func setWhiteBalanceLocked(_ locked: Bool) {
+        let d = UserDefaults.standard
+        if locked, let device = cameraDevice, device.isWhiteBalanceModeSupported(.locked) {
+            let tt = device.temperatureAndTintValues(for: device.deviceWhiteBalanceGains)
+            d.set(Double(tt.temperature), forKey: "camWBTemperature")
+            d.set(Double(tt.tint), forKey: "camWBTint")
+            d.set(true, forKey: "camWhiteBalanceManual")
+        } else {
+            d.set(false, forKey: "camWhiteBalanceManual")
+        }
+        applyCameraSettings()
+    }
+
+    /// Tap-to-focus/expose: independently gated on hardware support (isFocusPointOfInterestSupported /
+    /// isExposurePointOfInterestSupported, per Apple's docs), continuous mode at the tapped point rather
+    /// than one-shot .autoFocus/.autoExpose -- simpler than AVCam's subjectAreaDidChange-revert-to-center
+    /// dance, same practical result (refocus where you tapped, keep tracking from there).
+    /// ponytail: no revert-to-center on scene change; add an
+    /// AVCaptureDevice.subjectAreaDidChangeNotification observer if a tap that's now stale (subject walked
+    /// off) turns out to matter in practice.
+    /// `point` must already be in AVCaptureDevice's point-of-interest space -- see
+    /// CameraSettings.devicePoint(forViewPoint:orientation:mirrored:), the pure conversion from a preview tap.
+    func tapToFocus(at point: CGPoint) {
+        guard let device = cameraDevice else { return }
+        do { try device.lockForConfiguration() } catch {
+            applog("stream", "tap focus: lockForConfiguration failed: \(error.localizedDescription)", error: true)
+            return
+        }
+        defer { device.unlockForConfiguration() }
+        if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.continuousAutoFocus) {
+            device.focusPointOfInterest = point
+            device.focusMode = .continuousAutoFocus
+        }
+        if device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.continuousAutoExposure) {
+            device.exposurePointOfInterest = point
+            device.exposureMode = .continuousAutoExposure
+        }
+        applog("stream", "tap focus/expose at \(String(format: "%.2f,%.2f", point.x, point.y))")
     }
 
     // MARK: audio inputs
@@ -692,6 +792,8 @@ final class Streamer: ObservableObject {
         applog("stream", "cameraOff=\(off)")
         blackTask?.cancel(); blackTask = nil
         guard off else { evaluateSource(); return }
+        cameraDevice = nil
+        cameraCapabilities = nil
         Task { try? await mixer.attachVideo(nil) }
         blackTask = Task { [weak self] in
             guard let pb = Self.blackPixelBuffer() else { return }
@@ -1268,6 +1370,8 @@ final class Streamer: ObservableObject {
         blackTask?.cancel(); blackTask = nil
         stopHealthMonitoring()
         rtmpState = "stopped"
+        cameraDevice = nil
+        cameraCapabilities = nil
         Task {
             // Force blur off unconditionally, even if the toggle is still on: a session that ends with it
             // on must not leave the offscreen render loop running into the next goLive() (see
