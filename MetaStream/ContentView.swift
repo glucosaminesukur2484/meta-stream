@@ -46,10 +46,16 @@ struct ContentView: View {
     @EnvironmentObject var streamer: Streamer
     @EnvironmentObject var speaker: Speaker
     @EnvironmentObject var chat: ChatFeed
+    @EnvironmentObject var platforms: Platforms
     @AppStorage("rtmpURL") var ingestURL = "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app/"
     // ponytail: stream key in UserDefaults; move to Keychain if the phone is shared.
     @AppStorage("streamKey") var streamKey = ""
     @AppStorage("chatSite") var chatSite = "kick"
+    // Which origins get read aloud. The chat SHEET still shows one site (chatSite); the voice feed
+    // aggregates, because you can't pick a tab while walking with the phone in your pocket.
+    @AppStorage("voiceKick") var voiceKick = true
+    @AppStorage("voiceTwitch") var voiceTwitch = true
+    @AppStorage("voiceYouTube") var voiceYouTube = true
     @AppStorage("chatChannel") var chatChannel = ""
     @AppStorage("resolution") var resolution = "high"
     @AppStorage("fps") var fpsSetting = 30
@@ -146,7 +152,11 @@ struct ContentView: View {
         }
         .onAppear { startChat() }
         .onChange(of: chatChannel) { _, _ in startChat() }
-        .onChange(of: chatSite) { _, _ in startChat() }
+        .onChange(of: voiceKick) { _, _ in startChat() }
+        .onChange(of: voiceTwitch) { _, _ in startChat() }
+        .onChange(of: voiceYouTube) { _, _ in startChat() }
+        .onChange(of: platforms.twitchConnected) { _, _ in startChat() }
+        .onChange(of: platforms.ytConnected) { _, _ in startChat() }
         .onAppear { UIApplication.shared.isIdleTimerDisabled = keepAwake }
         .onChange(of: keepAwake) { _, v in UIApplication.shared.isIdleTimerDisabled = v }
         .onChange(of: streamer.lastPhotoAt) { _, _ in
@@ -218,10 +228,15 @@ struct ContentView: View {
         .padding(.top, 4)
     }
 
-    /// ponytail: Kick only for now — it's the one chat that needs no token. Others arrive with their transports.
+    /// Starts every enabled origin that has what it needs. Kick needs only a slug; Twitch and YouTube
+    /// need a connected account. Each origin is owned by exactly one feed, so nothing arrives twice.
     private func startChat() {
-        guard chatSite == "kick", !chatChannel.isEmpty else { chat.stop(); return }
-        chat.start(kickSlug: chatChannel)
+        var origins = 0
+        if voiceKick, !chatChannel.isEmpty { chat.start(kickSlug: chatChannel); origins += 1 } else { chat.stopKick() }
+        if voiceTwitch, platforms.twitchConnected { chat.startTwitch(platforms: platforms); origins += 1 } else { chat.stopTwitch() }
+        if voiceYouTube, platforms.ytConnected { chat.startYouTube(platforms: platforms); origins += 1 } else { chat.stopYouTube() }
+        // Only prefix "on Kick, …" when more than one origin is live — otherwise it's noise on every line.
+        speaker.showOrigin = origins > 1
     }
 
     /// auto → glasses → back → front → auto
