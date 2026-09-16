@@ -35,8 +35,11 @@ import Vision
     private static let detectStallThreshold: TimeInterval = 1.0
     private static let boxCarryCeiling: TimeInterval = 5.0  // belt-and-suspenders: drop ancient boxes even if the caller never looks at `stalled`
 
-    private let sequenceHandler = VNSequenceRequestHandler()
-    private let ciContext = CIContext()
+    // nonisolated(unsafe): CIContext and VNSequenceRequestHandler are Apple docs' own recommendation for
+    // reuse across frames/threads (CIContext explicitly documented thread-safe); Swift 6 mode still requires
+    // this annotation since neither class's Sendable conformance is certain to be audited in the SDK.
+    nonisolated(unsafe) private let sequenceHandler = VNSequenceRequestHandler()
+    nonisolated(unsafe) private let ciContext = CIContext()
 
     nonisolated(unsafe) private var frameCount = 0
     nonisolated(unsafe) private var boxes: [CGRect] = []     // normalized, already padded
@@ -81,7 +84,7 @@ import Vision
 
     // MARK: detection
 
-    private func runDetection(on full: CIImage, width: Int, height: Int) {
+    nonisolated private func runDetection(on full: CIImage, width: Int, height: Int) {
         var requests: [VNRequest] = []
         if options.faces { requests.append(VNDetectFaceRectanglesRequest()) }
         if options.text { requests.append(VNDetectTextRectanglesRequest()) }   // region only, no OCR -- also catches plates/badges/receipts/screens for free
@@ -107,13 +110,13 @@ import Vision
         }
     }
 
-    private func markDetected(_ newBoxes: [CGRect]) {
+    nonisolated private func markDetected(_ newBoxes: [CGRect]) {
         lastDetectionOK = Date()
         boxes = newBoxes
         setStalled(false)
     }
 
-    private func setStalled(_ value: Bool) {
+    nonisolated private func setStalled(_ value: Bool) {
         guard stalledShadow != value else { return }
         stalledShadow = value
         Task { @MainActor [weak self] in self?.stalled = value }
@@ -123,7 +126,7 @@ import Vision
 
     /// One pool per use (detect vs. output), rebuilt only if the requested size changes -- both are fixed
     /// for the life of a session in practice, since goLive() fixes the encoder geometry once (see Streamer).
-    private func pooledBuffer(pool: inout CVPixelBufferPool?, size: inout (Int, Int), width: Int, height: Int) -> CVPixelBuffer? {
+    nonisolated private func pooledBuffer(pool: inout CVPixelBufferPool?, size: inout (Int, Int), width: Int, height: Int) -> CVPixelBuffer? {
         if pool == nil || size != (width, height) {
             let attrs: [CFString: Any] = [
                 kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
@@ -144,12 +147,12 @@ import Vision
 
     // MARK: pure helpers -- see Self.demo()
 
-    static func pad(_ box: CGRect, by fraction: CGFloat) -> CGRect {
+    nonisolated static func pad(_ box: CGRect, by fraction: CGFloat) -> CGRect {
         let dx = box.width * fraction, dy = box.height * fraction
         return box.insetBy(dx: -dx, dy: -dy).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
     }
 
-    static func isExpired(lastDetection: Date, now: Date, maxAge: TimeInterval) -> Bool {
+    nonisolated static func isExpired(lastDetection: Date, now: Date, maxAge: TimeInterval) -> Bool {
         now.timeIntervalSince(lastDetection) > maxAge
     }
 }
