@@ -24,6 +24,10 @@ struct SettingsView: View {
     @AppStorage("voiceKick") var voiceKick = true
     @AppStorage("voiceTwitch") var voiceTwitch = true
     @AppStorage("voiceYouTube") var voiceYouTube = true
+    @AppStorage("blurOn") var blurOn = false
+    @AppStorage("blurFaces") var blurFaces = true
+    @AppStorage("blurText") var blurText = true
+    @AppStorage("blurBarcodes") var blurBarcodes = true
     @AppStorage("ttsMessagesOn") var ttsMessagesOn = true
     @AppStorage("ttsTipsOn") var ttsTipsOn = true
     @AppStorage("ttsFollowsOn") var ttsFollowsOn = true
