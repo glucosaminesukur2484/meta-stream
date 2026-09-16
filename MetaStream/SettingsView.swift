@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var streamer: Streamer
+    @EnvironmentObject var platforms: Platforms
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage("platform") var platform = "kick"
@@ -20,6 +21,9 @@ struct SettingsView: View {
     @AppStorage("phoneHeight") var phoneHeight = 720
     @AppStorage("phoneLandscape") var phoneLandscape = false
     @AppStorage("phoneFps") var phoneFps = 30
+    @AppStorage("voiceKick") var voiceKick = true
+    @AppStorage("voiceTwitch") var voiceTwitch = true
+    @AppStorage("voiceYouTube") var voiceYouTube = true
     @AppStorage("ttsMessagesOn") var ttsMessagesOn = true
     @AppStorage("ttsTipsOn") var ttsTipsOn = true
     @AppStorage("ttsFollowsOn") var ttsFollowsOn = true
@@ -135,6 +139,13 @@ struct SettingsView: View {
                         Slider(value: $ttsRate, in: 0.35...0.65)
                     }
                     Stepper("Read tips from $\(ttsMinTipCents / 100)", value: $ttsMinTipCents, in: 0...5000, step: 100)
+                    Toggle("Kick chat", isOn: $voiceKick)
+                    Toggle("Twitch chat", isOn: $voiceTwitch)
+                    Toggle("YouTube chat", isOn: $voiceYouTube)
+                    if !platforms.twitchMissingScopeFeatures.isEmpty, platforms.twitchConnected {
+                        Text("Reconnect Twitch in Manage to enable \(platforms.twitchMissingScopeFeatures.joined(separator: ", ")).")
+                            .font(.footnote).foregroundStyle(.orange)
+                    }
                 } header: { Text("Read aloud") } footer: {
                     Text("Chat is spoken through whatever is playing audio, so the glasses' open-ear speakers when they are connected. The tts pill on the live screen silences chat and alerts; stream warnings such as a dropped connection always speak.\n\nWith the glasses microphone selected, the open-ear speakers can bleed back into your audio. Use the phone microphone if viewers hear an echo.")
                 }
