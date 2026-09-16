@@ -21,6 +21,7 @@ struct SettingsView: View {
     @AppStorage("phoneHeight") var phoneHeight = 720
     @AppStorage("phoneLandscape") var phoneLandscape = false
     @AppStorage("phoneFps") var phoneFps = 30
+    @AppStorage("phoneStabilization") var phoneStabilization = "off"
     @AppStorage("voiceKick") var voiceKick = true
     @AppStorage("voiceTwitch") var voiceTwitch = true
     @AppStorage("voiceYouTube") var voiceYouTube = true
@@ -117,7 +118,14 @@ struct SettingsView: View {
                     Picker("Frame rate", selection: $phoneFps) {
                         Text("24").tag(24); Text("30").tag(30); Text("60").tag(60)
                     }
+                    Picker("Stabilisation", selection: $phoneStabilization) {
+                        Text("Off").tag("off")
+                        Text("Standard").tag("standard")
+                        Text("Cinematic").tag("cinematic")
+                        Text("Action").tag("action")
+                    }
                 } header: { Text("Video (phone camera)") } footer: {
+                    Text("Stabilisation is the same family of algorithms as the Camera app's Action mode. It crops the picture and the stronger modes add capture latency, so Standard is the safe pick for a live stream and Action is for rough movement you would otherwise not be able to watch. It applies to the phone camera only: the glasses stabilise in hardware and the app never sees those frames uncompressed. A mode the current resolution cannot do is ignored by iOS rather than refused.")
                     Text("Used when the source pill is set to the back or front camera, so the app is fully useful without glasses. Fixed for the whole stream, because changing frame size mid-broadcast breaks players — set it before going live.\n\nStarting on the glasses pins the stream to 720×1280 at 30 fps even if the phone later takes over, so the picture stays one format end to end.")
                 }
 
