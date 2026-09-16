@@ -644,14 +644,22 @@ final class Streamer: ObservableObject {
                 // Encoded by HaishinKit in whatever geometry goLive fixed for this session, so the outgoing
                 // stream never changes format even when the source switches. Phone capture pauses in the
                 // background; glasses HEVC doesn't.
-                let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: fallbackPosition)
+                // Re-read fresh on every attach (not cached) so a front/back switch re-picks the lens and
+                // re-runs every capability check against the NEW device -- see CameraSettings.apply's doc.
+                let camSettings = CameraSettings.loadFromDefaults()
+                let cam = CameraSettings.device(lens: camSettings.lens, position: fallbackPosition)
                 await wireMixer()
                 await mixer.setSessionPreset(phoneQuality.sessionPreset)
                 let mode = Self.stabilizationMode(phoneQuality.stabilization)
                 try await mixer.attachVideo(cam, track: 0) { unit in
                     unit.preferredVideoStabilizationMode = mode
+                    unit.isVideoMirrored = camSettings.mirrored
+                    if let device = unit.device {
+                        CameraSettings.apply(camSettings, to: device)
+                    }
                 }
                 if mode != .off { applog("stream", "stabilization requested: \(phoneQuality.stabilization)") }
+                applog("stream", "camera lens=\(camSettings.lens) position=\(fallbackPosition == .front ? "front" : "back")")
                 try? await mixer.setFrameRate(Float64(phoneQuality.fps))
                 await mixer.setVideoOrientation(phoneQuality.landscape ? .landscapeRight : .portrait)
                 source = "phone"
