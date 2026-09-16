@@ -326,19 +326,33 @@ final class Streamer: ObservableObject {
     /// source: the glasses hand over 720x1280 at up to 30 fps and Meta's SDK offers third-party apps
     /// nothing higher, so these settings cannot raise that — they exist so the app is useful without glasses.
     struct PhoneQuality: Sendable {
-        var height = 720                  // 720 or 1080
+        /// 720, 1080 or 2160 -- whichever CameraFormatCapabilities.probe() found this lens/position
+        /// actually has a format for (SettingsView.CameraSettingsView drives the picker off that; this
+        /// struct just carries whatever height goLive() was last called with, same as before 4K support).
+        var height = 720
         var landscape = false
-        var fps = 30                      // 24, 30 or 60
+        var fps = 30                      // whatever CameraFormatCapabilities said this resolution supports
         /// "off" | "standard" | "cinematic" | "action". Phone camera only — the glasses stabilise in
         /// hardware and hand over already-encoded video the app never touches uncompressed.
         var stabilization = "off"
 
-        /// Encoder frame size. Portrait is the glasses-native orientation; landscape is 16:9 for everything else.
+        /// Encoder frame size. Portrait is the glasses-native orientation; landscape is 16:9 for everything
+        /// else. long is derived (height * 16/9), not a 720/1080-only lookup, so 4K (2160 -> 3840) falls
+        /// out of the same formula rather than needing its own case.
         var size: CGSize {
-            let long = CGFloat(height == 1080 ? 1920 : 1280), short = CGFloat(height)
+            let short = CGFloat(height), long = short * 16 / 9
             return landscape ? CGSize(width: long, height: short) : CGSize(width: short, height: long)
         }
-        var sessionPreset: AVCaptureSession.Preset { height == 1080 ? .hd1920x1080 : .hd1280x720 }
+        /// AVCaptureSession.Preset has no way to derive its name from a number -- this mapping is just
+        /// that plumbing, not a capability assumption; CameraFormatCapabilities.probe (device-side) is
+        /// what actually decides which of these three a given lens/position offers in Settings.
+        var sessionPreset: AVCaptureSession.Preset {
+            switch height {
+            case 2160: return .hd4K3840x2160
+            case 1080: return .hd1920x1080
+            default: return .hd1280x720
+            }
+        }
     }
 
     /// The glasses' fixed output. Not configurable — see PhoneQuality.
@@ -349,7 +363,10 @@ final class Streamer: ObservableObject {
     /// strongest and needs iOS 18, so anything older falls back to `.cinematicExtended`.
     /// ponytail: sets the REQUESTED mode only — AVFoundation quietly ignores one the active format cannot
     /// do, and `activeVideoStabilizationMode` is where to look if that ever needs surfacing in the UI.
-    static func stabilizationMode(_ name: String) -> AVCaptureVideoStabilizationMode {
+    /// nonisolated: pure String -> enum mapping, no Streamer state -- CameraFormatCapabilities.probe
+    /// (CameraSettings.swift, not MainActor) calls this off the main actor to check per-format support;
+    /// without this it's a Swift 6 cross-actor call error, the exact trap this file's header warns about.
+    nonisolated static func stabilizationMode(_ name: String) -> AVCaptureVideoStabilizationMode {
         switch name {
         case "standard": return .standard
         case "cinematic": return .cinematic
@@ -717,6 +734,59 @@ final class Streamer: ObservableObject {
         guard source == "phone" else { return }
         UserDefaults.standard.set(lens, forKey: "camLens")
         Task { await switchTo(glasses: false) }
+    }
+
+    /// Live stabilisation switch -- deliberately a re-attach, same mechanism as switchLens above, not a
+    /// live tweak on the existing connection. VideoDeviceUnit (where preferredVideoStabilizationMode
+    /// actually lives -- see switchTo's attachVideo configuration closure) only exists inside that closure,
+    /// isolated to the mixer actor; Streamer only keeps the plain AVCaptureDevice handle afterward (see
+    /// cameraDevice's doc), by design, for Swift 6 region-isolation safety (see switchTo's re-acquire
+    /// comment -- that's the exact rule that broke the last build here). This HaishinKit version (2.1.0+)
+    /// exposes no confirmed way to reach a live VideoDeviceUnit again post-attach (unverifiable without a
+    /// build here), so this reattaches through switchTo(glasses:) instead. The framing jump this causes is
+    /// expected anyway -- each stabilisation mode crops differently -- so the extra reattach glitch costs
+    /// little more.
+    func setStabilization(_ mode: String) {
+        guard source == "phone" else { return }
+        UserDefaults.standard.set(mode, forKey: "phoneStabilization")
+        phoneQuality.stabilization = mode
+        Task { await switchTo(glasses: false) }
+    }
+
+    /// Live mirror toggle -- same reattach reasoning as setStabilization above: isVideoMirrored also only
+    /// lives on VideoDeviceUnit, set once in switchTo's attachVideo configuration closure. camMirrored is
+    /// already read fresh every attach via CameraSettings.loadFromDefaults(), so writing the key and
+    /// reattaching is the whole implementation.
+    func setMirrored(_ mirrored: Bool) {
+        guard source == "phone" else { return }
+        UserDefaults.standard.set(mirrored, forKey: "camMirrored")
+        Task { await switchTo(glasses: false) }
+    }
+
+    /// Long-press AE/AF lock: freezes focus and exposure at whatever they've already converged to
+    /// (`.locked` mode), independently gated per Apple's docs same as tapToFocus below. Off restores the
+    /// same continuous auto modes tapToFocus uses -- not whatever manual focus/exposure Settings say -- so
+    /// a second long-press reads as "un-jam", not a surprise mode switch.
+    /// ponytail: a reattach elsewhere (lens/stabilisation/mirror switch, or the fallback camera changing)
+    /// resets focus/exposure back to CameraSettings' own modes without telling this lock go stale --
+    /// ContentView clears its badge on a source change but not on an in-place reattach; add a
+    /// Streamer-side published lock flag if that combination turns out to matter in practice.
+    func setAEAFLocked(_ locked: Bool) {
+        guard let device = cameraDevice else { return }
+        do { try device.lockForConfiguration() } catch {
+            applog("stream", "AE/AF lock: lockForConfiguration failed: \(error.localizedDescription)", error: true)
+            return
+        }
+        defer { device.unlockForConfiguration() }
+        if locked {
+            if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
+            if device.isExposureModeSupported(.locked) { device.exposureMode = .locked }
+            applog("stream", "AE/AF lock engaged")
+        } else {
+            if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+            if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            applog("stream", "AE/AF lock released")
+        }
     }
 
     /// Live "lock" reads whatever continuous auto white balance has already converged to right now and

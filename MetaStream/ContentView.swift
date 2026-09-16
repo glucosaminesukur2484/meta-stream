@@ -1,6 +1,7 @@
 import SwiftUI
 import MWDATCore
 import AVFoundation
+import CoreMotion
 
 // MARK: - UIKit bridges
 
@@ -19,6 +20,26 @@ struct PreviewView: UIViewRepresentable {
         return view
     }
     func updateUIView(_ uiView: PreviewUIView, context: Context) {}
+}
+
+/// Viewfinder-only level: CMMotionManager roll -> a horizon line ContentView draws over the preview.
+/// Started/stopped with the Settings toggle so it costs nothing when off; never touches the capture
+/// pipeline or encoded video (see gridOverlay/levelOverlay in ContentView -- purely a SwiftUI overlay).
+/// ponytail: no background-state teardown -- ContentView is the app's root screen and never truly
+/// disappears in normal use, so there's no onDisappear to hook; if that stops holding (e.g. a future
+/// full-screen cover over it), stop() it there too.
+private final class LevelMonitor: ObservableObject {
+    @Published var rollDegrees: Double = 0
+    private let mm = CMMotionManager()
+    func start() {
+        guard mm.isDeviceMotionAvailable, !mm.isDeviceMotionActive else { return }
+        mm.deviceMotionUpdateInterval = 1.0 / 20   // smooth enough for a horizon line, cheap enough to leave running
+        mm.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
+            guard let data else { return }
+            self?.rollDegrees = data.attitude.roll * 180 / .pi
+        }
+    }
+    func stop() { mm.stopDeviceMotionUpdates() }
 }
 
 // MARK: - Live screen
@@ -68,6 +89,8 @@ struct ContentView: View {
     @AppStorage("camTorchLevel") var camTorchLevel = 0.0
     @AppStorage("camWhiteBalanceManual") var camWhiteBalanceManual = false
     @AppStorage("camMirrored") var camMirrored = false
+    @AppStorage("camGridOn") var camGridOn = false
+    @AppStorage("camLevelOn") var camLevelOn = false
     @AppStorage(LiveCameraControl.storageKey) var liveControlOrderRaw = LiveCameraControl.defaultOrderRaw
     /// auto: only YouTube (enhanced RTMP) and custom servers take the glasses' HEVC untouched. Kick, Restream,
     /// Instagram and TikTok are H.264-only ingests, and Twitch gates HEVC behind Affiliate, so they get a transcode.
@@ -90,9 +113,12 @@ struct ContentView: View {
     @State private var showCameraControls = false
     @State private var photoFlash = false
     @StateObject private var emotes = Emotes()
+    @StateObject private var levelMonitor = LevelMonitor()
     @State private var chatText = ""
     @State private var atBottom = true   // tracks whether the chat list should auto-scroll on new messages
     @State private var focusTap: CGPoint?   // raw view coords of the last tap-to-focus, for the square indicator
+    @State private var aeafLocked = false   // AE/AF lock badge -- see Streamer.setAEAFLocked
+    @State private var pinchStartZoom: Double?   // camZoom at the start of the current pinch -- see the MagnifyGesture below
 
     /// Data-driven strip contents: see LiveCameraControl's doc. Falls back to the full default set if the
     /// stored value is empty or unparseable, so there's never a dead strip with nothing shown.
@@ -119,20 +145,55 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             GeometryReader { geo in
-                // Tap-to-focus/expose, phone source only -- see Streamer.tapToFocus's doc. A gesture, not a
-                // strip control (per CameraSettings.LiveCameraControl's doc), so it works whether or not the
-                // strip below is open.
-                PreviewView().ignoresSafeArea()      // one layer for glasses, phone camera and black frames; PiP uses it too
-                    .contentShape(Rectangle())
-                    .gesture(SpatialTapGesture().onEnded { value in
-                        guard streamer.source == "phone" else { return }
-                        tap()
-                        focusTap = value.location
-                        let norm = CGPoint(x: value.location.x / max(geo.size.width, 1), y: value.location.y / max(geo.size.height, 1))
-                        let orientation: AVCaptureVideoOrientation = phoneLandscape ? .landscapeRight : .portrait
-                        streamer.tapToFocus(at: CameraSettings.devicePoint(forViewPoint: norm, orientation: orientation, mirrored: camMirrored))
-                        Task { try? await Task.sleep(for: .milliseconds(700)); withAnimation { focusTap = nil } }
-                    })
+                ZStack {
+                    // Tap-to-focus/expose and long-press AE/AF lock, phone source only -- see
+                    // Streamer.tapToFocus's and Streamer.setAEAFLocked's docs. Gestures, not strip controls
+                    // (per CameraSettings.LiveCameraControl's doc), so they work whether or not the strip
+                    // below is open. Long-press and tap share one touch, so they're combined exclusively
+                    // (long-press wins if it completes, tap fires otherwise) rather than as two independent
+                    // gestures racing on the same finger.
+                    PreviewView().ignoresSafeArea()      // one layer for glasses, phone camera and black frames; PiP uses it too
+                        .contentShape(Rectangle())
+                        .gesture(
+                            LongPressGesture(minimumDuration: 0.5).exclusively(before: SpatialTapGesture())
+                                .onEnded { value in
+                                    guard streamer.source == "phone" else { return }
+                                    switch value {
+                                    case .first:
+                                        tap(strong: true)
+                                        aeafLocked.toggle()
+                                        streamer.setAEAFLocked(aeafLocked)
+                                    case .second(let tapValue):
+                                        tap()
+                                        focusTap = tapValue.location
+                                        let norm = CGPoint(x: tapValue.location.x / max(geo.size.width, 1), y: tapValue.location.y / max(geo.size.height, 1))
+                                        let orientation: AVCaptureVideoOrientation = phoneLandscape ? .landscapeRight : .portrait
+                                        streamer.tapToFocus(at: CameraSettings.devicePoint(forViewPoint: norm, orientation: orientation, mirrored: camMirrored))
+                                        Task { try? await Task.sleep(for: .milliseconds(700)); withAnimation { focusTap = nil } }
+                                    }
+                                }
+                        )
+                        // Two-finger pinch, independent of the one-finger gesture above -- simultaneousGesture
+                        // so neither cancels the other. Multiplies from the zoom value AT PINCH START (not
+                        // absolute -- MagnifyGesture.magnification is already relative to gesture start, so
+                        // capturing camZoom once and multiplying every update is correct, no running delta
+                        // needed), through the exact CameraSettings.clamped() the zoom slider and
+                        // CameraSettings.apply use -- one zoom value, three ways to change it, same clamp.
+                        .simultaneousGesture(
+                            MagnifyGesture()
+                                .onChanged { value in
+                                    guard streamer.source == "phone" else { return }
+                                    if pinchStartZoom == nil { pinchStartZoom = camZoom }
+                                    let range = streamer.cameraCapabilities?.zoomRange ?? (camZoom...camZoom)
+                                    camZoom = CameraSettings.clamped((pinchStartZoom ?? camZoom) * Double(value.magnification), min: range.lowerBound, max: range.upperBound)
+                                    streamer.applyCameraSettings()
+                                }
+                                .onEnded { _ in pinchStartZoom = nil }
+                        )
+
+                    if camGridOn { gridOverlay(size: geo.size) }
+                    if camLevelOn { levelOverlay(size: geo.size) }
+                }
             }
             .ignoresSafeArea()
 
@@ -142,6 +203,19 @@ struct ContentView: View {
                     .position(p)
                     .transition(.opacity)
                     .allowsHitTesting(false)
+            }
+
+            if aeafLocked {
+                VStack {
+                    Text("AE/AF LOCK")
+                        .font(.caption2.weight(.heavy))
+                        .foregroundStyle(.yellow)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(.top, 54)
+                    Spacer()
+                }
+                .allowsHitTesting(false)
             }
 
             if streamer.cameraOff {
@@ -197,7 +271,7 @@ struct ContentView: View {
             // so nothing here needs backpressure handling.
             for await e in chat.events { speaker.speak(e) }
         }
-        .onAppear { startChat(); applyBlur() }
+        .onAppear { startChat(); applyBlur(); if camLevelOn { levelMonitor.start() } }
         .onChange(of: blurOn) { _, _ in applyBlur() }
         .onChange(of: blurFaces) { _, _ in applyBlur() }
         .onChange(of: blurText) { _, _ in applyBlur() }
@@ -209,7 +283,9 @@ struct ContentView: View {
         .onChange(of: platforms.twitchConnected) { _, _ in startChat() }
         .onChange(of: platforms.ytConnected) { _, _ in startChat() }
         // Glasses (re)connecting can flip the source out from under an open strip -- nothing left to control.
-        .onChange(of: streamer.source) { _, s in if s != "phone" { showCameraControls = false } }
+        // aeafLocked resets too: a lock only ever made sense against the phone device it was set on.
+        .onChange(of: streamer.source) { _, s in if s != "phone" { showCameraControls = false; aeafLocked = false } }
+        .onChange(of: camLevelOn) { _, on in on ? levelMonitor.start() : levelMonitor.stop() }
         .onAppear { UIApplication.shared.isIdleTimerDisabled = keepAwake }
         .onChange(of: keepAwake) { _, v in UIApplication.shared.isIdleTimerDisabled = v }
         .onChange(of: streamer.lastPhotoAt) { _, _ in
@@ -513,24 +589,26 @@ struct ContentView: View {
         let cap = streamer.cameraCapabilities
         switch control {
         case .lens:
-            // "0.5x / 1x / 2x style, like the Camera app" -- shown only if this position actually has more
-            // than one, and only the lenses it actually has (CameraSettings.availableLenses, not
-            // device(lens:)'s silent fallback-to-wide). streamer.cameraPosition, not the fallbackCamera
-            // AppStorage preference -- setSource("front"/"back") can diverge from it, see that property's doc.
-            let lenses = CameraSettings.availableLenses(position: streamer.cameraPosition)
-            if lenses.count > 1 {
+            // Ascending by real zoom factor and labeled with THIS device's actual multipliers -- see
+            // CameraSettings.lensOptions (fixes the device-confirmed bug where this used to render "1,
+            // 0.5, 2" from CameraLens's declaration order with a hardcoded telephoto "2"). Empty when this
+            // position has only one lens. streamer.cameraPosition, not the fallbackCamera AppStorage
+            // preference -- setSource("front"/"back") can diverge from it, see that property's old doc.
+            let options = CameraSettings.lensOptions(position: streamer.cameraPosition)
+            if !options.isEmpty {
                 HStack(spacing: 6) {
-                    ForEach(lenses, id: \.rawValue) { lens in
+                    ForEach(options, id: \.lens.rawValue) { option in
                         Button {
                             tap()
-                            camLens = lens.rawValue
-                            streamer.switchLens(lens.rawValue)
+                            camLens = option.lens.rawValue
+                            camZoom = option.zoomFactor   // one zoom value, three ways to change it -- see the pinch gesture's doc
+                            streamer.switchLens(option.lens.rawValue)
                         } label: {
-                            Text(lensShort(lens))
+                            Text(option.label)
                                 .font(.caption2.weight(.bold))
                                 .frame(width: 30, height: 30)
-                                .foregroundStyle(camLens == lens.rawValue ? .black : .white)
-                                .background(camLens == lens.rawValue ? AnyShapeStyle(.white) : AnyShapeStyle(.white.opacity(0.15)), in: Circle())
+                                .foregroundStyle(camLens == option.lens.rawValue ? .black : .white)
+                                .background(camLens == option.lens.rawValue ? AnyShapeStyle(.white) : AnyShapeStyle(.white.opacity(0.15)), in: Circle())
                         }
                         .buttonStyle(.plain)
                     }
@@ -573,7 +651,83 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
             }
+        case .stabilization:
+            // Deliberate discrete Menu, not a slider you graze -- each mode crops differently (visible
+            // framing jump) and the stronger modes add latency, so switching has to be a deliberate tap.
+            // Writes through phoneStabilization, the same @AppStorage key Settings' Camera screen uses.
+            Menu {
+                Picker("Stabilisation", selection: Binding(
+                    get: { phoneStabilization },
+                    set: { newValue in tap(); phoneStabilization = newValue; streamer.setStabilization(newValue) })) {
+                    Text("Off").tag("off")
+                    Text("Standard").tag("standard")
+                    Text("Cinematic").tag("cinematic")
+                    Text("Action").tag("action")
+                }
+            } label: {
+                VStack(spacing: 2) {
+                    Image(systemName: "gyroscope")
+                    Text(stabilizationShort(phoneStabilization)).font(.caption2)
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .background(phoneStabilization == "off" ? AnyShapeStyle(.white.opacity(0.15)) : AnyShapeStyle(Color.blue.gradient), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+        case .mirror:
+            // Mirroring was Settings-only; exposed live here too, same camMirrored key -- see
+            // Streamer.setMirrored's doc for why this is a reattach, not a live connection tweak.
+            Button {
+                tap()
+                camMirrored.toggle()
+                streamer.setMirrored(camMirrored)
+            } label: {
+                VStack(spacing: 2) {
+                    Image(systemName: "arrow.left.and.right")
+                    Text(camMirrored ? "Mirrored" : "Mirror").font(.caption2)
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .background(camMirrored ? AnyShapeStyle(Color.blue.gradient) : AnyShapeStyle(.white.opacity(0.15)), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
         }
+    }
+
+    private func stabilizationShort(_ mode: String) -> String {
+        switch mode {
+        case "standard": return "STD"
+        case "cinematic": return "CINE"
+        case "action": return "ACTION"
+        default: return "OFF"
+        }
+    }
+
+    /// Rule-of-thirds grid, viewfinder only -- never touches the encoded video (see camGridOn's Settings footer).
+    private func gridOverlay(size: CGSize) -> some View {
+        Path { p in
+            p.move(to: CGPoint(x: size.width / 3, y: 0)); p.addLine(to: CGPoint(x: size.width / 3, y: size.height))
+            p.move(to: CGPoint(x: size.width * 2 / 3, y: 0)); p.addLine(to: CGPoint(x: size.width * 2 / 3, y: size.height))
+            p.move(to: CGPoint(x: 0, y: size.height / 3)); p.addLine(to: CGPoint(x: size.width, y: size.height / 3))
+            p.move(to: CGPoint(x: 0, y: size.height * 2 / 3)); p.addLine(to: CGPoint(x: size.width, y: size.height * 2 / 3))
+        }
+        .stroke(Color.white.opacity(0.5), lineWidth: 0.75)
+        .allowsHitTesting(false)
+    }
+
+    /// Horizon level from LevelMonitor's roll, viewfinder only -- same encode-never-sees-it guarantee as
+    /// the grid. Turns green within ~1.5° of level, matching the Camera app's own level convention.
+    private func levelOverlay(size: CGSize) -> some View {
+        let roll = levelMonitor.rollDegrees
+        let level = abs(roll) < 1.5
+        return Rectangle()
+            .fill(level ? Color.green : Color.white)
+            .frame(width: size.width * 0.6, height: 1.5)
+            .rotationEffect(.degrees(-roll))
+            .position(x: size.width / 2, y: size.height / 2)
+            .allowsHitTesting(false)
     }
 
     /// Fires on every value change, not just release -- SwiftUI's Slider already updates a plain
@@ -593,14 +747,6 @@ struct ContentView: View {
         }
         .opacity(disabled ? 0.4 : 1)
         .disabled(disabled)
-    }
-
-    private func lensShort(_ lens: CameraLens) -> String {
-        switch lens {
-        case .ultrawide: return "0.5"
-        case .wide: return "1"
-        case .telephoto: return "2"
-        }
     }
 
     private func tap(strong: Bool = false) {

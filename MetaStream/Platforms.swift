@@ -44,7 +44,12 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
     /// channel's sets without going round Twitch's undocumented web GQL for an ID we already hold.
     private(set) var twitchUserID = ""
     // https://dev.twitch.tv/docs/api/reference/#get-content-classification-labels — the current valid CCL ids.
+    // Fallback set for when fetchTwitchLabelCatalog() hasn't run yet or failed -- see twitchLabelCatalog.
     static let twitchLabelIDs = ["DebatedSocialIssuesAndPolitics", "DrugsIntoxication", "SexualThemes", "ViolentGraphic", "Gambling", "ProfanityVulgarity"]
+    /// The real, current label set with human names, from GET helix/content_classification_labels -- see
+    /// fetchTwitchLabelCatalog(). Empty until that call succeeds; StreamManagerView falls back to
+    /// twitchLabelIDs + its own labelName() switch while this is empty.
+    @Published private(set) var twitchLabelCatalog: [(id: String, name: String)] = []
     // Read scopes the chat feed's EventSub subscriptions need, keyed by the feature name the UI shows.
     // user:read:chat has shipped since the first Twitch connect, so old tokens already carry it; the other
     // three are new as of chat-feed support, so an existing user's token won't have them until they reconnect.
@@ -310,6 +315,26 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
         }
     }
 
+    /// GET helix/content_classification_labels -- the current, real label set with human names, so a label
+    /// Twitch adds later shows up in StreamManagerView without a code change, instead of only ever offering
+    /// Self.twitchLabelIDs' fixed six. `name`/`description` are the documented response fields (confirmed
+    /// against Twitch's published schema); falls back to `description` then the raw id if `name` is somehow
+    /// missing, so a row is never blank. Cached per session (guard on non-empty) -- this needs no
+    /// broadcaster_id and doesn't change while the app is running, so there's nothing to gain re-fetching on
+    /// every refreshTwitch(). Left empty (not overwritten with a partial/failed result) on any error or an
+    /// empty response, so callers fall back to Self.twitchLabelIDs + StreamManagerView.labelName() --
+    /// no network yet is a known-good default, not a blank picker.
+    func fetchTwitchLabelCatalog() async {
+        guard twitchLabelCatalog.isEmpty else { return }
+        guard let data = (try? await helix("GET", "/content_classification_labels"))?["data"] as? [[String: Any]] else { return }
+        let parsed = data.compactMap { item -> (id: String, name: String)? in
+            guard let id = item["id"] as? String else { return nil }
+            return (id, (item["name"] as? String) ?? (item["description"] as? String) ?? id)
+        }
+        guard !parsed.isEmpty else { return }
+        twitchLabelCatalog = parsed
+    }
+
     /// `tags`/`labels`/`delay`/`language` are all "omit when unchanged" against the last-loaded values, so an
     /// untouched (or not-yet-loaded) field can never silently wipe what's already on the channel.
     func twitchApply(title: String, category: StreamCategory?, tags: [String] = [], labels: [String: Bool] = [:], delay: Int = 0, language: String = "") async {
@@ -321,10 +346,13 @@ final class Platforms: NSObject, ObservableObject, ASWebAuthenticationPresentati
             .filter { !$0.isEmpty && !$0.contains(" ") && $0.count <= 25 }.prefix(10))
         if cleanTags != twitchTags { body["tags"] = cleanTags }
 
-        let currentLabels = twitchLabels.intersection(Self.twitchLabelIDs)
+        // Keyed off `labels`' own keys (whatever StreamManagerView showed toggles for -- the fetched
+        // catalog when available, Self.twitchLabelIDs otherwise), not the hardcoded id list directly, so a
+        // label the catalog added actually gets sent instead of silently staying whatever it was.
+        let currentLabels = twitchLabels.intersection(labels.keys)
         let newLabels = Set(labels.filter(\.value).keys)
         if newLabels != currentLabels {
-            body["content_classification_labels"] = Self.twitchLabelIDs.map { ["id": $0, "is_enabled": newLabels.contains($0)] }
+            body["content_classification_labels"] = labels.keys.map { ["id": $0, "is_enabled": newLabels.contains($0)] }
         }
 
         if delay != twitchDelay { body["delay"] = delay }   // Partner-only anti-stream-sniping delay; Twitch ignores/errors it for everyone else

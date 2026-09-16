@@ -49,9 +49,17 @@ struct StreamManagerView: View {
         switch tab { case "kick": platforms.kickStreamKey; case "twitch": platforms.twitchStreamKey
                      case "restream": platforms.restreamStreamKey; default: platforms.ytStreamKey }
     }
+    /// Kick's channel response carries a per-account stream.url (see Platforms.refreshKick's kickStreamURL) --
+    /// prefer it over the constant, same as ytIngest already does for YouTube; empty (not yet fetched, or the
+    /// call failed) falls back to the published default. Twitch and Restream don't hand back a per-account
+    /// ingest anywhere in this app's API usage, so those stay on their constants.
     private var ingest: String {
-        switch tab { case "kick": Platforms.kickIngest; case "twitch": Platforms.twitchIngest
-                     case "restream": Platforms.restreamIngest; default: platforms.ytIngest }
+        switch tab {
+        case "kick": platforms.kickStreamURL.isEmpty ? Platforms.kickIngest : platforms.kickStreamURL
+        case "twitch": Platforms.twitchIngest
+        case "restream": Platforms.restreamIngest
+        default: platforms.ytIngest
+        }
     }
     private var hasCategory: Bool { tab == "kick" || tab == "twitch" }
     private var canSendChat: Bool { tab != "restream" }
@@ -232,8 +240,8 @@ struct StreamManagerView: View {
                 TextField("Language (e.g. en)", text: $language)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                 Stepper("Stream delay: \(delay)s", value: $delay, in: 0...900, step: 15)
-                ForEach(Platforms.twitchLabelIDs, id: \.self) { id in
-                    Toggle(Self.labelName(id), isOn: Binding(get: { labels[id] ?? false }, set: { labels[id] = $0 }))
+                ForEach(twitchLabelOptions, id: \.id) { opt in
+                    Toggle(opt.name, isOn: Binding(get: { labels[opt.id] ?? false }, set: { labels[opt.id] = $0 }))
                 }
             }
             if tab == "youtube" {
@@ -266,6 +274,17 @@ struct StreamManagerView: View {
         }
     }
 
+    /// The real label set (id, human name) from Platforms.fetchTwitchLabelCatalog() once it's loaded;
+    /// Self.twitchLabelIDs + labelName() below while it's still empty (not yet fetched, or the call
+    /// failed) -- see that function's doc for why empty is the safe default rather than blocking on it.
+    private var twitchLabelOptions: [(id: String, name: String)] {
+        platforms.twitchLabelCatalog.isEmpty
+            ? Platforms.twitchLabelIDs.map { ($0, Self.labelName($0)) }
+            : platforms.twitchLabelCatalog
+    }
+
+    /// Fallback names for Self.twitchLabelIDs, used only while twitchLabelOptions hasn't got a fetched
+    /// catalog yet.
     private static func labelName(_ id: String) -> String {
         switch id {
         case "DebatedSocialIssuesAndPolitics": return "Debated social issues & politics"
@@ -333,7 +352,7 @@ struct StreamManagerView: View {
         case "twitch":
             title = platforms.twitchTitle; category = platforms.twitchCategory
             tags = platforms.twitchTags.joined(separator: ", ")
-            labels = Dictionary(uniqueKeysWithValues: Platforms.twitchLabelIDs.map { ($0, platforms.twitchLabels.contains($0)) })
+            labels = Dictionary(uniqueKeysWithValues: twitchLabelOptions.map { ($0.id, platforms.twitchLabels.contains($0.id)) })
             delay = platforms.twitchDelay
             language = platforms.twitchLanguage
         case "restream":
@@ -348,7 +367,9 @@ struct StreamManagerView: View {
     private func refresh() async {
         switch tab {
         case "kick": await platforms.refreshKick()
-        case "twitch": await platforms.refreshTwitch()
+        case "twitch":
+            await platforms.refreshTwitch()
+            await platforms.fetchTwitchLabelCatalog()   // real label set + names; see twitchLabelOptions
         case "restream": await platforms.refreshRestream()
         default: await platforms.refreshYouTube()
         }

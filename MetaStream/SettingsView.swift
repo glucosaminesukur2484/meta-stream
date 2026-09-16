@@ -53,6 +53,16 @@ struct IngestSettingsView: View {
         "youtube": "rtmps://a.rtmps.youtube.com:443/live2",
         "restream": "rtmp://live.restream.io/live",
     ]
+    /// Flat bitrate ceilings a few destinations' ingest is known to reject above, tested/documented
+    /// knowledge (README), not queryable from any API -- same footing as the codec table below. Twitch's
+    /// is the non-Partner number; this app has no way to know partner status, so it stays conservative.
+    /// Platforms not listed (YouTube, Restream, Instagram, TikTok, Custom) don't publish one flat cap the
+    /// same way -- YouTube's own guidance scales with resolution up to ~51,000 kbps at 4K60, for instance
+    /// -- so rather than fabricate a number for those, they keep genericBitrateCeiling.
+    private static let bitrateCeilings: [String: Int] = ["kick": 8000, "twitch": 6000]
+    private static let genericBitrateCeiling = 9000
+    private static func bitrateCeiling(for platform: String) -> Int { bitrateCeilings[platform] ?? genericBitrateCeiling }
+
     private static let hints: [String: String] = [
         "kick": "H.264 only, up to 8000 kbps. Transcoding uses the phone's decoder, which iOS stops in the background unless the Picture in Picture window stays open.",
         "twitch": "Up to 6000 kbps, 8000 for Partners. HEVC is Affiliate/Partner only, so Auto sends H.264.",
@@ -73,6 +83,7 @@ struct IngestSettingsView: View {
                 }
                 .onChange(of: platform) { _, p in
                     if let url = Self.presets[p] { ingestURL = url } else if p != "custom" { ingestURL = "" }
+                    if bitrateKbps > Self.bitrateCeiling(for: p) { bitrateKbps = Self.bitrateCeiling(for: p) }
                 }
                 TextField("Ingest URL", text: $ingestURL)
                     .font(.footnote.monospaced())
@@ -92,7 +103,7 @@ struct IngestSettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack { Text("Bitrate"); Spacer(); Text(String(bitrateKbps) + " kbps").monospacedDigit().foregroundStyle(.secondary) }
                     Slider(value: Binding(get: { Double(bitrateKbps) }, set: { bitrateKbps = Int($0 / 250) * 250 }),
-                           in: 1000...9000, step: 250)
+                           in: 1000...Double(Self.bitrateCeiling(for: platform)), step: 250)
                 }
                 if ingestURL.lowercased().hasPrefix("srt://") {
                     Stepper("SRT buffer \(srtLatencyMs) ms", value: $srtLatencyMs, in: 200...8000, step: 200)
@@ -160,10 +171,13 @@ struct CameraSettingsView: View {
     @AppStorage("camTorchLevel") var camTorchLevel = 0.0
     @AppStorage("camMirrored") var camMirrored = false
     @AppStorage("camGDC") var camGDC = true
+    @AppStorage("camGridOn") var camGridOn = false
+    @AppStorage("camLevelOn") var camLevelOn = false
 
     // Re-probed whenever lens or position changes -- front/back and wide/ultrawide/telephoto genuinely
     // differ in what they support, so a stale probe would grey out (or wrongly enable) the wrong controls.
     @State private var cap: CameraCapabilities?
+    @State private var formatCaps: CameraFormatCapabilities?
 
     private var position: AVCaptureDevice.Position { fallbackCamera == "front" ? .front : .back }
 
@@ -174,6 +188,12 @@ struct CameraSettingsView: View {
                     Text("No camera found for this lens/position on this device (expected in Simulator). Settings below still save, but can't be checked against real hardware here.")
                         .foregroundStyle(.orange)
                 }
+            }
+
+            Section {
+                NavigationLink("Customise live control strip") { LiveControlsCustomizeView() }
+            } footer: {
+                Text("Choose which controls appear over the preview while streaming, and in what order.")
             }
 
             Section {
@@ -267,25 +287,135 @@ struct CameraSettingsView: View {
                 Text("Geometric distortion correction straightens the ultra-wide lens's fisheye look; matters most on that lens. Torch is a fill light for the whole session, not a camera flash — it drains battery fast at high levels.")
             }
 
-            Section {
-                Picker("Resolution", selection: $phoneHeight) { Text("720p").tag(720); Text("1080p").tag(1080) }
-                Picker("Aspect", selection: $phoneLandscape) { Text("Portrait 9:16").tag(false); Text("Landscape 16:9").tag(true) }
-                Picker("Frame rate", selection: $phoneFps) { Text("24").tag(24); Text("30").tag(30); Text("60").tag(60) }
-                Picker("Stabilisation", selection: $phoneStabilization) {
-                    Text("Off").tag("off"); Text("Standard").tag("standard"); Text("Cinematic").tag("cinematic"); Text("Action").tag("action")
+            // Group: purely to stay under @ViewBuilder's 10-direct-child cap on Form's content closure --
+            // this Form was already at 9 sections before these two, so a straight 11th/12th addition risks
+            // a build error I can't compile-check here. Group doesn't change layout, just child counting.
+            Group {
+                Section {
+                    Toggle("Rule-of-thirds grid", isOn: $camGridOn)
+                    Toggle("Level", isOn: $camLevelOn)
+                } header: { Text("Viewfinder overlays") } footer: {
+                    Text("Grid and level only draw over the preview here — they never reach the recorded or streamed video.")
                 }
-            } header: { Text("Resolution & stabilisation") } footer: {
-                Text("Stabilisation crops the picture and the stronger modes add capture latency, so Standard is the safe pick for a live stream and Action is for rough movement you would otherwise not be able to watch. Fixed for the whole stream — set it before going live. A mode the current resolution can't do is ignored by iOS rather than refused.")
+
+                Section {
+                    if let formatCaps, !formatCaps.resolutions.isEmpty {
+                        let res = formatCaps.resolutions.first { $0.height == phoneHeight } ?? formatCaps.resolutions[0]
+                        Picker("Resolution", selection: $phoneHeight) {
+                            ForEach(formatCaps.resolutions, id: \.height) { Text("\($0.height)p").tag($0.height) }
+                        }
+                        Picker("Aspect", selection: $phoneLandscape) { Text("Portrait 9:16").tag(false); Text("Landscape 16:9").tag(true) }
+                        Picker("Frame rate", selection: $phoneFps) {
+                            ForEach(res.frameRates, id: \.self) { Text("\($0)").tag($0) }
+                        }
+                        Picker("Stabilisation", selection: $phoneStabilization) {
+                            ForEach(res.stabilizationModes, id: \.self) { Text(stabilizationLabel($0)).tag($0) }
+                        }
+                    } else {
+                        Text("No capture format info for this lens (expected in Simulator). Resolution/frame rate/stabilisation below keep whatever was last saved.")
+                            .foregroundStyle(.orange)
+                    }
+                } header: { Text("Resolution & stabilisation") } footer: {
+                    Text("Options come straight off this lens's supported capture formats, so they change per lens/device and per resolution — nothing here is offered unless this camera can actually do it. Stabilisation crops the picture and the stronger modes add capture latency, so Standard is the safe pick for a live stream and Action is for rough movement you would otherwise not be able to watch. Fixed for the whole stream — set it before going live.")
+                }
             }
         }
         .navigationTitle("Camera")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: refresh)
         .onChange(of: camLens) { _, _ in refresh() }
+        .onChange(of: phoneHeight) { _, newHeight in
+            // Changing resolution can invalidate the stored fps/stabilisation (they're interdependent --
+            // a format that does 4K60 may not do 4K120) -- snap both to something this resolution actually
+            // supports rather than silently keeping a now-unavailable value.
+            guard let res = formatCaps?.resolutions.first(where: { $0.height == newHeight }) else { return }
+            snapToResolution(res)
+        }
         .onChange(of: fallbackCamera) { _, _ in refresh() }
     }
 
-    private func refresh() { cap = CameraCapabilities.probe(lens: camLens, position: position) }
+    private func stabilizationLabel(_ mode: String) -> String {
+        switch mode {
+        case "standard": return "Standard"
+        case "cinematic": return "Cinematic"
+        case "action": return "Action"
+        default: return "Off"
+        }
+    }
+
+    private func snapToResolution(_ res: CameraFormatCapabilities.Resolution) {
+        if !res.frameRates.contains(phoneFps) { phoneFps = res.nearestFps(to: phoneFps) }
+        if !res.stabilizationModes.contains(phoneStabilization) { phoneStabilization = res.nearestStabilization(to: phoneStabilization) }
+    }
+
+    /// Re-probed whenever lens or position changes, like `cap` above. Also snaps the stored resolution
+    /// (and, via snapToResolution, fps/stabilisation) to the nearest one this lens actually supports --
+    /// keeps a previously-saved 1080p/30 choice intact on hardware that still supports it, but never
+    /// leaves the picker pointed at a resolution this camera can't shoot.
+    private func refresh() {
+        cap = CameraCapabilities.probe(lens: camLens, position: position)
+        formatCaps = CameraFormatCapabilities.probe(lens: camLens, position: position)
+        guard let res = formatCaps?.nearestResolution(to: phoneHeight) else { return }
+        if res.height != phoneHeight { phoneHeight = res.height }
+        snapToResolution(res)
+    }
+}
+
+// MARK: - Live control strip customisation
+
+/// Which controls the strip in ContentView shows, and in what order -- writes the one
+/// liveCameraControlOrder key CameraSettings.LiveCameraControl.order(from:) parses. List + .onMove +
+/// EditButton is the idiomatic SwiftUI reorder pattern; .onDelete doubles as "remove from the strip" (still
+/// reachable via swipe even without tapping Edit) and guards against emptying the list outright -- dropping
+/// to zero controls would mean the camera button in ContentView opens onto nothing, with no way back short
+/// of finding this screen blind, so removal below a floor of one is refused, and "Restore defaults" is
+/// always one tap away as the other way back in.
+struct LiveControlsCustomizeView: View {
+    @AppStorage(LiveCameraControl.storageKey) private var orderRaw = LiveCameraControl.defaultOrderRaw
+    @State private var order: [LiveCameraControl] = []
+
+    private var available: [LiveCameraControl] { LiveCameraControl.allCases.filter { !order.contains($0) } }
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(order, id: \.self) { Text($0.label) }
+                    .onMove { order.move(fromOffsets: $0, toOffset: $1); save() }
+                    .onDelete { offsets in
+                        guard order.count - offsets.count >= 1 else { return }   // guard the trap -- see type doc
+                        order.remove(atOffsets: offsets)
+                        save()
+                    }
+            } header: { Text("On the strip") } footer: {
+                Text("Drag to reorder, or swipe to remove. At least one control stays on.")
+            }
+
+            if !available.isEmpty {
+                Section("Available") {
+                    ForEach(available, id: \.self) { control in
+                        Button { order.append(control); save() } label: {
+                            Label(control.label, systemImage: "plus.circle")
+                        }
+                    }
+                }
+            }
+
+            Section("Preview") {
+                Text(order.isEmpty ? "Nothing shown" : order.map(\.label).joined(separator: "  ·  "))
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+
+            Section {
+                Button("Restore defaults") { order = LiveCameraControl.defaultOrder; save() }
+            }
+        }
+        .navigationTitle("Customise controls")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .primaryAction) { EditButton() } }
+        .onAppear { order = LiveCameraControl.order(from: orderRaw) }
+    }
+
+    private func save() { orderRaw = order.map(\.rawValue).joined(separator: ",") }
 }
 
 // MARK: - Audio
@@ -314,6 +444,7 @@ struct AudioSettingsView: View {
 
 struct ReadAloudSettingsView: View {
     @EnvironmentObject var platforms: Platforms
+    @AppStorage("ttsVoiceID") var ttsVoiceID = ""   // Speaker reads this same key; "" = system default
     @AppStorage("ttsMessagesOn") var ttsMessagesOn = true
     @AppStorage("ttsTipsOn") var ttsTipsOn = true
     @AppStorage("ttsFollowsOn") var ttsFollowsOn = true
@@ -325,8 +456,36 @@ struct ReadAloudSettingsView: View {
     @AppStorage("voiceTwitch") var voiceTwitch = true
     @AppStorage("voiceYouTube") var voiceYouTube = true
 
+    /// Every voice actually installed on THIS device/iOS version, grouped and sorted by language --
+    /// AVSpeechSynthesisVoice.speechVoices() enumerates the real set rather than a hardcoded list, so a
+    /// language iOS adds later just shows up. Computed once (static let): the installed set doesn't change
+    /// mid-session and speechVoices() isn't cheap enough to call on every body evaluation.
+    private static let voiceGroups: [(language: String, voices: [AVSpeechSynthesisVoice])] = {
+        let grouped = Dictionary(grouping: AVSpeechSynthesisVoice.speechVoices(), by: \.language)
+        return grouped.keys.sorted().map { lang in (lang, grouped[lang]!.sorted { $0.name < $1.name }) }
+    }()
+
+    private static func languageLabel(_ code: String) -> String {
+        Locale.current.localizedString(forIdentifier: code) ?? code
+    }
+
     var body: some View {
         Form {
+            Section {
+                Picker("Voice", selection: $ttsVoiceID) {
+                    Text("System default").tag("")
+                    ForEach(Self.voiceGroups, id: \.language) { group in
+                        Section(Self.languageLabel(group.language)) {
+                            ForEach(group.voices, id: \.identifier) { voice in
+                                Text(voice.name).tag(voice.identifier)
+                            }
+                        }
+                    }
+                }
+            } footer: {
+                Text("Voices installed on this iPhone (Settings → Accessibility → Spoken Content → Voices adds more).")
+            }
+
             Section {
                 Toggle("Chat messages", isOn: $ttsMessagesOn)
                 Toggle("Tips and bits", isOn: $ttsTipsOn)
