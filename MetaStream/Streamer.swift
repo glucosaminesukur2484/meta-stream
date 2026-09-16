@@ -311,6 +311,9 @@ final class Streamer: ObservableObject {
         var height = 720                  // 720 or 1080
         var landscape = false
         var fps = 30                      // 24, 30 or 60
+        /// "off" | "standard" | "cinematic" | "action". Phone camera only — the glasses stabilise in
+        /// hardware and hand over already-encoded video the app never touches uncompressed.
+        var stabilization = "off"
 
         /// Encoder frame size. Portrait is the glasses-native orientation; landscape is 16:9 for everything else.
         var size: CGSize {
@@ -322,6 +325,22 @@ final class Streamer: ObservableObject {
 
     /// The glasses' fixed output. Not configurable — see PhoneQuality.
     static let glassesSize = CGSize(width: 720, height: 1280)
+
+    /// Apple's "Action mode" is Camera-app branding for the extended cinematic algorithm; AVFoundation
+    /// exposes it as a stabilisation mode on the capture connection. `.cinematicExtendedEnhanced` is the
+    /// strongest and needs iOS 18, so anything older falls back to `.cinematicExtended`.
+    /// ponytail: sets the REQUESTED mode only — AVFoundation quietly ignores one the active format cannot
+    /// do, and `activeVideoStabilizationMode` is where to look if that ever needs surfacing in the UI.
+    static func stabilizationMode(_ name: String) -> AVCaptureVideoStabilizationMode {
+        switch name {
+        case "standard": return .standard
+        case "cinematic": return .cinematic
+        case "action":
+            if #available(iOS 18.0, *) { return .cinematicExtendedEnhanced }
+            return .cinematicExtended
+        default: return .off
+        }
+    }
 
     private var phoneQuality = PhoneQuality()
     /// Geometry the current session fixed at goLive, reused as the offscreen blur canvas.
@@ -628,7 +647,11 @@ final class Streamer: ObservableObject {
                 let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: fallbackPosition)
                 await wireMixer()
                 await mixer.setSessionPreset(phoneQuality.sessionPreset)
-                try await mixer.attachVideo(cam)
+                let mode = Self.stabilizationMode(phoneQuality.stabilization)
+                try await mixer.attachVideo(cam, track: 0) { unit in
+                    unit.preferredVideoStabilizationMode = mode
+                }
+                if mode != .off { applog("stream", "stabilization requested: \(phoneQuality.stabilization)") }
                 try? await mixer.setFrameRate(Float64(phoneQuality.fps))
                 await mixer.setVideoOrientation(phoneQuality.landscape ? .landscapeRight : .portrait)
                 source = "phone"
