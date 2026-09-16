@@ -155,6 +155,7 @@ final class Streamer: ObservableObject {
     var speaker: Speaker?
     var privacy: Privacy?
     private var blurHidCamera = false
+    private var blurEffectActive = false   // mirrors privacy.enabled -- tracks whether the effect is registered on mixer.screen
     private var lastFrames = 0
     private var lastBytes = 0
 
@@ -351,6 +352,7 @@ final class Streamer: ObservableObject {
                 self.lastFrames = f; self.lastBytes = b
                 tick += 1
                 await self.adaptBitrate()
+                await self.syncBlurEffect()
                 self.checkBlurStall()
                 if self.live, tick % 5 == 0 {
                     let mode = self.hot.transcoder == nil ? "hevc-passthrough" : "h264-transcode"
@@ -683,8 +685,9 @@ final class Streamer: ObservableObject {
             let mixer = self.mixer, hot = self.hot
             // Warm-up decodes to get the decoder synced to a keyframe, but nothing reaches the encoder until
             // publishing: video arriving before the publish handshake completes makes ingests drop the connection.
-            let privacy = self.privacy
-            hot.transcoder = Transcoder(transform: { buf in privacy?.process(buf) }) { sb in
+            // Blur (if enabled) happens once, in the mixer via syncBlurEffect() below -- not here anymore,
+            // so decoded frames are never pixellated twice.
+            hot.transcoder = Transcoder { sb in
                 guard hot.live else { return }
                 hot.appended += 1
                 Task { await mixer.append(sb) }
@@ -730,10 +733,11 @@ final class Streamer: ObservableObject {
                     expectedFrameRate: Float64(rate)))
                 if h264 {                                 // decoded frames need the mixer → encoder → stream path
                     await wireMixer()
+                    await mixer.screen.size = size         // offscreen rendering (blur) must output the geometry fixed above
                     var vm = await mixer.videoMixerSettings
-                    vm.mode = .passthrough                // track 0 straight through to the encoder
-                    vm.mainTrack = 0
+                    vm.mainTrack = 0                       // track 0 straight through to the encoder
                     await mixer.setVideoMixerSettings(vm)
+                    await syncBlurEffect()                 // registers blur + switches to .offscreen if already enabled
                     // Decode before connecting: an ingest that finds no video in its first seconds of probing
                     // treats the whole session as audio-only. Warm up, then connect with frames already flowing.
                     hot.warm = true
@@ -798,6 +802,33 @@ final class Streamer: ObservableObject {
         currentBitrateKbps = next
         lastBitrateAdjustAt = Date()
         applog("stream", "bitrate \(up ? "up" : "down") -> \(next) kbps (\(reason))")
+    }
+
+    /// Keeps the mixer's blur effect registration and rendering mode in sync with Privacy.enabled. Privacy
+    /// exposes `enabled` as a plain var that ContentView sets directly (see ContentView's blur toggle) with
+    /// no delegate back to Streamer, so this is polled from the 1s stats tick; goLive()'s h264 setup also
+    /// calls it once up front so a session that starts with blur already on doesn't wait a full tick for its
+    /// first frames to be covered.
+    ///
+    /// registerVideoEffect hooks mixer.screen (HaishinKit's offscreen render object, track 0 by default) --
+    /// checked HaishinKit 2.1.0 and 2.2.5 source directly: that's the one place phone camera, black frames
+    /// and (in H.264 mode) decoded glasses frames all pass through, since every mixer.append/attachVideo call
+    /// feeds it regardless of mode. Effects only run while the mixer is in .offscreen mode, though --
+    /// .passthrough skips Screen/VideoTrackScreenObject rendering entirely and forwards raw buffers straight
+    /// to the encoder, which is why blur silently did nothing before this. Offscreen costs more (an extra
+    /// render pass), so it's only switched on while blur is actually enabled.
+    private func syncBlurEffect() async {
+        guard let privacy, privacy.enabled != blurEffectActive else { return }
+        blurEffectActive = privacy.enabled
+        if blurEffectActive {
+            _ = await mixer.screen.registerVideoEffect(privacy)
+        } else {
+            _ = await mixer.screen.unregisterVideoEffect(privacy)
+        }
+        var vm = await mixer.videoMixerSettings
+        vm.mode = blurEffectActive ? .offscreen : .passthrough
+        await mixer.setVideoMixerSettings(vm)
+        applog("stream", "privacy blur effect \(blurEffectActive ? "registered" : "unregistered"), mixer mode=\(vm.mode.rawValue)")
     }
 
     /// Blur failing open is worse than no blur, because the streamer is trusting it. When detection stalls
