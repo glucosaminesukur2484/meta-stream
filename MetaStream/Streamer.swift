@@ -27,6 +27,38 @@ private final class Hot: @unchecked Sendable {
     var appended = 0                    // decoded frames handed to the mixer
     var showMixerVideo = false          // preview shows mixer output (phone camera / black) instead of glasses frames
     weak var preview: AVSampleBufferDisplayLayer?
+    // Outbound-pressure telemetry for the bitrate controller (acted on only while Streamer.phoneEncodes is
+    // true). Written by QueueWatcher below (HaishinKit's own NetworkMonitor callback), read once a second by
+    // Streamer's existing stats loop. Same race tolerance as frames/bytes above: worst case a stale tick.
+    var queueBytesOut = 0
+    var bytesOutPerSecond = 0
+    var congested = false               // latched by QueueWatcher on .publishInsufficientBWOccured; edge-consumed
+}
+
+/// Captures HaishinKit's NetworkMonitor reports into `hot`; does no bitrate math itself. The actual AIMD
+/// decision runs in Streamer's existing 1s stats loop, not here — NetworkMonitor is `package`-scoped
+/// (checked HaishinKit 2.1.0 source directly), so this StreamBitRateStrategy callback is the only public
+/// door onto outbound queue/throughput. mamimumVideo/AudioBitRate are unused (we don't let this type touch
+/// bitrate) but are `let`s so they're readable off-actor without await, same trick HaishinKit's own
+/// StreamVideoAdaptiveBitRateStrategy uses.
+private actor QueueWatcher: StreamBitRateStrategy {
+    let mamimumVideoBitRate = 0
+    let mamimumAudioBitRate = 0
+    private let hot: Hot
+    init(hot: Hot) { self.hot = hot }
+    func adjustBitrate(_ event: NetworkMonitorEvent, stream: some StreamConvertible) async {
+        switch event {
+        case .status(let report):
+            hot.queueBytesOut = report.currentQueueBytesOut
+            hot.bytesOutPerSecond = report.currentBytesOutPerSecond
+        case .publishInsufficientBWOccured(let report):
+            hot.queueBytesOut = report.currentQueueBytesOut
+            hot.bytesOutPerSecond = report.currentBytesOutPerSecond
+            hot.congested = true
+        case .reset:
+            break
+        }
+    }
 }
 
 /// Mirrors the mixer's video (phone camera, black frames) into the same preview layer the glasses use,
@@ -83,6 +115,19 @@ final class Streamer: ObservableObject {
     @Published var glassesThermal: ThermalLevel? { didSet { checkGlassesThermal() } }   // nil when unknown/disconnected
     @Published var phoneBattery: Int? { didSet { checkPhoneBattery() } }      // nil when unknown; unmonitored outside a live session
     @Published var thermal: ProcessInfo.ThermalState = .nominal { didSet { checkThermal() } }
+
+    // MARK: adaptive bitrate (active whenever phoneEncodes is true — see below)
+    @Published var currentBitrateKbps = 0     // live value for the HUD; == configured target while phoneEncodes is false
+    private var bitrateCeilingKbps = 0        // user's configured bitrateKbps; up-steps never exceed this
+    private var thermalCeilingKbps: Int?      // set while thermal >= .serious; caps the ceiling until it clears
+    private var cleanTicks = 0                // consecutive good 1s ticks; 15 triggers an up-step
+    private var lastBitrateAdjustAt: Date?    // rate limit: one adjustment per bitrateAdjustCooldown
+    private let bitrateAdjustCooldown: TimeInterval = 3
+    private let bitrateFloorKbps = 500
+    /// True whenever HaishinKit's own encoder is doing the work: h264 transcode (any source), or hevc with
+    /// the phone driving video — phone-camera fallback (source == "phone") or black frames (cameraOff).
+    /// False only for hevc glasses passthrough, the one case with no bitrate knob (see goLive's gate comment).
+    private var phoneEncodes: Bool { hot.transcoder != nil || source == "phone" || cameraOff }
 
     /// Short glasses state for the HUD: "streaming" | "connecting" | "off".
     var glassesShort: String {
@@ -169,6 +214,7 @@ final class Streamer: ObservableObject {
                 self.frames = f
                 self.lastFrames = f; self.lastBytes = b
                 tick += 1
+                await self.adaptBitrate()
                 if self.live, tick % 5 == 0 {
                     let mode = self.hot.transcoder == nil ? "hevc-passthrough" : "h264-transcode"
                     applog("stream", "stats source=\(self.source) \(mode) glassesFps=\(self.fps) glassesKbps=\(self.kbps) sent=\(self.hot.sent) decoded=\(self.hot.transcoder?.decoded ?? 0) appended=\(self.hot.appended)")
@@ -465,7 +511,27 @@ final class Streamer: ObservableObject {
     func goLive(url: String, key: String, micUID: String, fallbackPosition: AVCaptureDevice.Position, bitrateKbps: Int = 4000, codec: String = "hevc") {
         self.fallbackPosition = fallbackPosition
         let h264 = codec == "h264"
+        // ponytail: adaptive bitrate's real gate is phoneEncodes ("is the phone doing the encoding"), not
+        // codec == h264 — h264 always means the phone encodes, but so does hevc with the phone camera
+        // driving video (source == "phone") or black frames (cameraOff). The one case with no knob is hevc
+        // GLASSES PASSTHROUGH: the glasses pick their own HEVC bitrate (measured 450-600 kbps) and the phone
+        // never re-encodes that video, so there's nothing to turn down. There's no headroom either — a link
+        // that can't carry 600 kbps can't carry a transcode, since "helping" would mean targeting below
+        // ~500 kbps, and 720x1280 at that rate is unwatchable. Do NOT auto-switch passthrough -> transcode
+        // as a survival mode either: transcode needs the mixer pipeline, which silently re-imposes the PiP
+        // requirement for background streaming — the streamer pockets the phone, the stream dies, and
+        // nothing here tells them why.
         hot.transcoder?.invalidate()
+        currentBitrateKbps = bitrateKbps          // HUD baseline; moves once phoneEncodes goes true
+        bitrateCeilingKbps = bitrateKbps
+        thermalCeilingKbps = nil
+        cleanTicks = 0
+        lastBitrateAdjustAt = nil
+        hot.congested = false; hot.queueBytesOut = 0; hot.bytesOutPerSecond = 0
+        // Installed regardless of codec: harmless telemetry-only capture (see QueueWatcher) even on a
+        // session where phoneEncodes never goes true, and source/cameraOff can flip phoneEncodes mid-session
+        // (glasses -> phone fallback) independent of the codec picked here.
+        Task { await stream.setBitRateStrategy(QueueWatcher(hot: hot)) }
         if h264 {
             let mixer = self.mixer, hot = self.hot
             // Warm-up decodes to get the decoder synced to a keyframe, but nothing reaches the encoder until
@@ -537,6 +603,56 @@ final class Streamer: ObservableObject {
                 Task { try? await connection.close() }   // drop a half-open socket so the next attempt starts clean
             }
         }
+    }
+
+    // MARK: adaptive bitrate control
+
+    /// Called once a second from the stats loop above. Runs whenever phoneEncodes is true (h264 transcode,
+    /// or hevc with the phone driving video) — a no-op for hevc glasses passthrough, the one path with no
+    /// knob (see goLive's gate comment). Reads QueueWatcher's telemetry off `hot`, decides, and applies; the
+    /// network signal is real (HaishinKit's own NetworkMonitor via StreamBitRateStrategy), the decision loop
+    /// is ours, so it stays in lockstep with the existing 1s tick instead of a second timer.
+    private func adaptBitrate() async {
+        guard phoneEncodes, live else { return }
+        if hot.congested {
+            hot.congested = false
+            cleanTicks = 0
+            await stepBitrate(up: false, reason: "queue backlog")
+            return
+        }
+        let throughputKbps = hot.bytesOutPerSecond * 8 / 1000
+        if throughputKbps < currentBitrateKbps * 7 / 10 {   // short of target by 30%+
+            cleanTicks = 0
+            await stepBitrate(up: false, reason: "throughput \(throughputKbps)kbps < target \(currentBitrateKbps)kbps")
+            return
+        }
+        cleanTicks += 1
+        if cleanTicks >= 15 {
+            cleanTicks = 0
+            await stepBitrate(up: true, reason: "15s clean")
+        }
+    }
+
+    /// Applies one AIMD step and logs the ladder (Settings → Logs shows it after a walk). Rate-limited so
+    /// congestion + thermal firing together still yields at most one change per bitrateAdjustCooldown.
+    private func stepBitrate(up: Bool, reason: String) async {
+        if let last = lastBitrateAdjustAt, Date().timeIntervalSince(last) < bitrateAdjustCooldown { return }
+        let ceiling = min(thermalCeilingKbps ?? bitrateCeilingKbps, bitrateCeilingKbps)
+        let next = Self.steppedBitrate(current: currentBitrateKbps, up: up, ceilingKbps: max(ceiling, bitrateFloorKbps), floorKbps: bitrateFloorKbps)
+        guard next != currentBitrateKbps else { return }
+        var vs = await stream.videoSettings
+        vs.bitRate = next * 1000
+        try? await stream.setVideoSettings(vs)
+        currentBitrateKbps = next
+        lastBitrateAdjustAt = Date()
+        applog("stream", "bitrate \(up ? "up" : "down") -> \(next) kbps (\(reason))")
+    }
+
+    /// Pure step: 20% down (floors at floorKbps), 10% up (ceilings at ceilingKbps). No I/O, no HaishinKit —
+    /// the part worth unit-testing, exercised by Self.demo() below.
+    static func steppedBitrate(current: Int, up: Bool, ceilingKbps: Int, floorKbps: Int) -> Int {
+        let next = up ? current + current / 10 : current - current / 5
+        return min(max(next, floorKbps), ceilingKbps)
     }
 
     /// Connects + publishes, retrying with exponential backoff (1, 2, 4, 8 s, capped at 15 s) on any failure.
@@ -686,7 +802,21 @@ final class Streamer: ObservableObject {
 
     private func checkThermal() {
         // ThermalState isn't Comparable; rawValue order is nominal < fair < serious < critical.
-        guard thermal.rawValue >= ProcessInfo.ThermalState.serious.rawValue, !warnedThermal else { return }
+        let serious = thermal.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+        // Heat and congestion both want less bitrate, and encoding is the expensive part — cap the ceiling
+        // at wherever the AIMD loop is *after* one forced step down, so up-steps can't climb back until
+        // thermal clears. Edge-triggered on thermalCeilingKbps == nil so this fires once per entry, not once
+        // per tick. Gated on phoneEncodes, same as adaptBitrate — no knob to turn during hevc passthrough.
+        if serious, thermalCeilingKbps == nil, phoneEncodes, live {
+            thermalCeilingKbps = currentBitrateKbps   // close the edge-trigger now; refined once the drop lands
+            Task {
+                await self.stepBitrate(up: false, reason: "thermal \(self.thermal)")
+                self.thermalCeilingKbps = self.currentBitrateKbps
+            }
+        } else if !serious {
+            thermalCeilingKbps = nil
+        }
+        guard serious, !warnedThermal else { return }
         warnedThermal = true
         speaker?.speakSystem("phone getting hot")
     }
@@ -720,6 +850,10 @@ final class Streamer: ObservableObject {
         hot.warm = false
         hot.transcoder?.invalidate()
         hot.transcoder = nil
+        currentBitrateKbps = 0
+        thermalCeilingKbps = nil
+        cleanTicks = 0
+        lastBitrateAdjustAt = nil
         fallbackTask?.cancel()
         blackTask?.cancel(); blackTask = nil
         stopHealthMonitoring()
@@ -805,3 +939,18 @@ final class Streamer: ObservableObject {
         return String(text[range])
     }
 }
+
+#if DEBUG
+extension Streamer {
+    /// Self-check for the pure AIMD step — no device, no HaishinKit.
+    static func demo() {
+        assert(steppedBitrate(current: 1000, up: false, ceilingKbps: 4000, floorKbps: 500) == 800, "down 20%")
+        assert(steppedBitrate(current: 600, up: false, ceilingKbps: 4000, floorKbps: 500) == 500, "floors at 500")
+        assert(steppedBitrate(current: 500, up: false, ceilingKbps: 4000, floorKbps: 500) == 500, "floor is a floor")
+        assert(steppedBitrate(current: 500, up: true, ceilingKbps: 4000, floorKbps: 500) == 550, "up 10%")
+        assert(steppedBitrate(current: 3900, up: true, ceilingKbps: 4000, floorKbps: 500) == 4000, "ceilings, no overshoot")
+        assert(steppedBitrate(current: 4000, up: true, ceilingKbps: 4000, floorKbps: 500) == 4000, "ceiling is a ceiling")
+        print("Streamer.demo() ok")
+    }
+}
+#endif
