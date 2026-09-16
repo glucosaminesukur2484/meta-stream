@@ -729,7 +729,7 @@ final class Streamer: ObservableObject {
     func setWhiteBalanceLocked(_ locked: Bool) {
         let d = UserDefaults.standard
         if locked, let device = cameraDevice, device.isWhiteBalanceModeSupported(.locked) {
-            let tt = device.temperatureAndTintValues(for: device.whiteBalanceGains)
+            let tt = device.temperatureAndTintValues(for: device.deviceWhiteBalanceGains)
             d.set(Double(tt.temperature), forKey: "camWBTemperature")
             d.set(Double(tt.tint), forKey: "camWBTint")
             d.set(true, forKey: "camWhiteBalanceManual")
