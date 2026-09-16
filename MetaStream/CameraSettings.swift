@@ -86,6 +86,14 @@ enum CameraLens: String, CaseIterable {
     }
 }
 
+/// One button in the live lens-switch row: a physical lens paired with the exact zoom factor (and its
+/// display label) THIS device's hardware actually puts it at -- see CameraSettings.lensOptions(position:).
+struct LensOption: Equatable {
+    let lens: CameraLens
+    let zoomFactor: Double
+    let label: String
+}
+
 extension CameraSettings {
     /// Discovers the physical camera for `lens` at `position`, falling back to the standard wide lens
     /// (present on every iPhone that has a camera at all) when the device has no ultra-wide/telephoto --
@@ -108,6 +116,82 @@ extension CameraSettings {
         CameraLens.allCases.filter {
             AVCaptureDevice.DiscoverySession(deviceTypes: [$0.deviceType], mediaType: .video, position: position).devices.first != nil
         }
+    }
+
+    /// Ascending by real zoom factor (ultra-wide < wide < telephoto -- always true by physical definition,
+    /// so the ORDER never needs a device query, only the LABELS do). Device-confirmed bug this replaces:
+    /// the strip used to iterate CameraLens.allCases' declaration order (wide, ultrawide, telephoto -> "1,
+    /// 0.5, 2") with a hardcoded telephoto label of "2", which is wrong on any iPhone whose telephoto isn't
+    /// 2x (3x on 14/15 Pro, 5x on 15/16 Pro Max, etc). Wide is always exactly 1x -- every other lens's zoom
+    /// factor is relative to it, by AVFoundation convention. Ultra-wide/telephoto come from the position's
+    /// virtual multi-camera device where one exists: AVCaptureDevice.virtualDeviceSwitchOverVideoZoomFactors
+    /// reports the zoom factors, in the wide-anchored 1.0 domain, at which the system crosses from one
+    /// constituent lens to the next (confirmed against Apple's current docs -- one fewer entry than
+    /// constituentDevices, values ascend in the same order) -- that crossover point is, by definition,
+    /// where the next lens's native optical framing takes over, i.e. its real display multiplier; this is
+    /// the same number the system Camera app's own buttons are built from, no separate "display" API is
+    /// needed pre-iOS-18 (displayVideoZoomFactorMultiplier is iOS 18+ only, above this app's 17.2 floor).
+    /// minAvailableVideoZoomFactor on that same virtual device is ultra-wide's multiplier for the same
+    /// reason -- it's defined as how far below wide's 1.0 this virtual device can go, which only ultra-wide
+    /// answers. Falls back to fieldOfViewMultiplier() below for whichever lens that didn't cover (no
+    /// virtual device at this position at all); a lens that STILL can't be derived either way is left off
+    /// the row entirely -- never a guessed label. See Self.demo() for the pure trig half of this.
+    static func lensOptions(position: AVCaptureDevice.Position) -> [LensOption] {
+        let available = availableLenses(position: position)
+        guard available.count > 1 else { return [] }   // solo lens: nothing to switch between
+
+        var ultrawideFactor: Double?
+        var telephotoFactor: Double?
+        let virtual = AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: position)
+            ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: position)
+            ?? AVCaptureDevice.default(.builtInDualCamera, for: .video, position: position)
+        if let virtual {
+            let switchOvers = virtual.virtualDeviceSwitchOverVideoZoomFactors.map(\.doubleValue)
+            let virtualMin = Double(virtual.minAvailableVideoZoomFactor)   // CGFloat on the SDK -- explicit, not assumed
+            if available.contains(.ultrawide), virtualMin < 1 {
+                ultrawideFactor = virtualMin
+            }
+            if available.contains(.telephoto), let hi = switchOvers.max() {
+                telephotoFactor = hi
+            }
+        }
+        if available.contains(.ultrawide), ultrawideFactor == nil {
+            ultrawideFactor = fieldOfViewMultiplier(of: .ultrawide, position: position)
+        }
+        if available.contains(.telephoto), telephotoFactor == nil {
+            telephotoFactor = fieldOfViewMultiplier(of: .telephoto, position: position)
+        }
+
+        var options: [LensOption] = [LensOption(lens: .wide, zoomFactor: 1, label: "1")]
+        if let m = ultrawideFactor { options.append(LensOption(lens: .ultrawide, zoomFactor: m, label: multiplierLabel(m))) }
+        if let m = telephotoFactor { options.append(LensOption(lens: .telephoto, zoomFactor: m, label: multiplierLabel(m))) }
+        return options.sorted { $0.zoomFactor < $1.zoomFactor }
+    }
+
+    /// Fallback when there's no virtual multi-camera device to read a switchover factor from (older
+    /// hardware): the ratio of two lenses' diagonal field-of-view tangents is their real zoom multiplier --
+    /// basic rectilinear-lens optics (focal length is proportional to tan(halfFOV) for a fixed sensor
+    /// size), not an iPhone-specific fact, so this works for any device pair without a per-model table.
+    private static func fieldOfViewMultiplier(of lens: CameraLens, position: AVCaptureDevice.Position) -> Double? {
+        guard lens != .wide,
+              let wide = device(lens: "wide", position: position), wide.activeFormat.videoFieldOfView > 0,
+              let other = device(lens: lens.rawValue, position: position), other.activeFormat.videoFieldOfView > 0
+        else { return nil }
+        return zoomMultiplier(wideFOVDegrees: Double(wide.activeFormat.videoFieldOfView), otherFOVDegrees: Double(other.activeFormat.videoFieldOfView))
+    }
+
+    /// Pure trig half of fieldOfViewMultiplier -- exercised directly in Self.demo() without any device.
+    static func zoomMultiplier(wideFOVDegrees: Double, otherFOVDegrees: Double) -> Double {
+        let halfWide = wideFOVDegrees / 2 * .pi / 180, halfOther = otherFOVDegrees / 2 * .pi / 180
+        return tan(halfWide) / tan(halfOther)
+    }
+
+    /// Rounds a derived multiplier to the nearest half-step for display -- real lens multipliers (0.5x,
+    /// 1x, 2x, 3x, 5x) are always clean numbers; the raw hardware/trig value lands within noise of one
+    /// (e.g. 2.98) rather than exactly on it.
+    static func multiplierLabel(_ m: Double) -> String {
+        let rounded = (m * 2).rounded() / 2
+        return rounded.truncatingRemainder(dividingBy: 1) == 0 ? String(format: "%.0f", rounded) : String(format: "%.1f", rounded)
     }
 
     // MARK: pure clamps -- see Self.demo(). One generic clamp for zoom/ISO/bias/lens-position/torch (all
@@ -300,16 +384,87 @@ struct CameraCapabilities {
     }
 }
 
+/// What resolutions THIS lens/position can actually shoot, and for each, the frame rates and stabilisation
+/// modes that resolution's capture format(s) support -- replaces the old fixed 720p/1080p x 24/30/60 x
+/// off/standard/cinematic/action lists Settings used to offer on every device regardless of hardware. Built
+/// from AVCaptureSession.Preset support rather than raw device.formats enumeration -- Streamer's capture
+/// pipeline already selects resolution via mixer.setSessionPreset(phoneQuality.sessionPreset) (see
+/// PhoneQuality), so probing exactly the presets that pipeline can pick between (720p/1080p/4K) keeps this
+/// incapable of ever offering a resolution the capture side can't actually set. Probed fresh per lens/
+/// position exactly like CameraCapabilities.probe, for the same reason.
+struct CameraFormatCapabilities {
+    struct Resolution: Equatable {
+        let height: Int                     // matches PhoneQuality.height's encoding (720/1080/2160)
+        let frameRates: [Int]                // ascending, whole fps this resolution's format(s) report
+        let stabilizationModes: [String]     // subset of "off"/"standard"/"cinematic"/"action"
+
+        func nearestFps(to desired: Int) -> Int {
+            frameRates.min { abs($0 - desired) < abs($1 - desired) } ?? desired
+        }
+        func nearestStabilization(to desired: String) -> String {
+            stabilizationModes.contains(desired) ? desired : "off"
+        }
+    }
+    let resolutions: [Resolution]   // ascending by height; probe() returns nil rather than an empty array
+
+    /// height -> (preset, landscape pixel dimensions) -- the fixed set PhoneQuality.sessionPreset already
+    /// maps to. Not a capability guess: this only decides which of THOSE presets to test for on the
+    /// attached device, same closed set the capture pipeline itself is limited to.
+    private static let candidates: [(height: Int, preset: AVCaptureSession.Preset, dims: (Int, Int))] =
+        [(720, .hd1280x720, (1280, 720)), (1080, .hd1920x1080, (1920, 1080)), (2160, .hd4K3840x2160, (3840, 2160))]
+    private static let standardFps = [15, 24, 25, 30, 50, 60, 120, 240]
+    private static let stabilizationNames = ["standard", "cinematic", "action"]
+
+    static func probe(lens: String, position: AVCaptureDevice.Position) -> CameraFormatCapabilities? {
+        guard let device = CameraSettings.device(lens: lens, position: position) else { return nil }
+        let resolutions: [Resolution] = candidates.compactMap { height, preset, dims in
+            guard device.supportsSessionPreset(preset) else { return nil }
+            // Union fps/stabilisation across every format matching this preset's pixel dimensions --
+            // several formats (different binning/color spaces) commonly share one resolution.
+            let matching = device.formats.filter {
+                let d = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+                return (Int(d.width), Int(d.height)) == dims || (Int(d.height), Int(d.width)) == dims
+            }
+            guard !matching.isEmpty else { return nil }
+            var fps: Set<Int> = []
+            for format in matching {
+                for range in format.videoSupportedFrameRateRanges {
+                    let lo = Int(range.minFrameRate.rounded(.up)), hi = Int(range.maxFrameRate.rounded(.down))
+                    if lo <= hi { fps.formUnion(lo...hi) }
+                }
+            }
+            let offeredFps = standardFps.filter { fps.contains($0) }
+            guard !offeredFps.isEmpty else { return nil }
+            let stab = stabilizationNames.filter { name in
+                matching.contains { $0.isVideoStabilizationModeSupported(Streamer.stabilizationMode(name)) }
+            }
+            return Resolution(height: height, frameRates: offeredFps, stabilizationModes: ["off"] + stab)
+        }
+        return resolutions.isEmpty ? nil : CameraFormatCapabilities(resolutions: resolutions.sorted { $0.height < $1.height })
+    }
+
+    /// Nearest available resolution to a stored/desired height -- exact match if present, otherwise the
+    /// closest, so a stored 1080p preference on a lens that tops out at 720p still lands somewhere sane
+    /// instead of the picker silently showing nothing.
+    func nearestResolution(to desiredHeight: Int) -> Resolution? {
+        resolutions.min { abs($0.height - desiredHeight) < abs($1.height - desiredHeight) }
+    }
+}
+
 /// One entry in the live control strip ContentView opens over the preview (see ContentView's
 /// cameraControlStrip). Tap-to-focus/expose is deliberately not a case here -- it's a gesture directly on
 /// the preview, not a strip button (see Streamer.tapToFocus). Membership and order are user-configurable
 /// (Settings gets the picker UI separately); ContentView renders `LiveCameraControl.order(from:)`'s result
 /// rather than a hardcoded HStack, so adding/removing/reordering entries there needs no ContentView change.
 enum LiveCameraControl: String, CaseIterable {
-    case lens, zoom, exposure, torch, whiteBalanceLock
+    // stabilization/mirror: deliberate re-attaches, not live connection tweaks -- see Streamer.
+    // setStabilization/setMirrored's docs. AE/AF lock and the grid/level overlays are NOT cases here:
+    // lock is a long-press gesture on the preview (like tap-to-focus, see ContentView's gesture), and
+    // grid/level are Settings-only viewfinder toggles, never strip buttons.
+    case lens, zoom, exposure, torch, whiteBalanceLock, stabilization, mirror
 
     static let storageKey = "liveCameraControlOrder"
-    static let defaultOrder: [LiveCameraControl] = [.lens, .zoom, .exposure, .torch, .whiteBalanceLock]
+    static let defaultOrder: [LiveCameraControl] = [.lens, .zoom, .exposure, .torch, .whiteBalanceLock, .stabilization, .mirror]
     static let defaultOrderRaw = defaultOrder.map(\.rawValue).joined(separator: ",")
 
     /// Pure parse: comma-joined rawValues (UserDefaults.standard[storageKey]) -> ordered cases. Unknown
@@ -319,6 +474,20 @@ enum LiveCameraControl: String, CaseIterable {
     static func order(from raw: String) -> [LiveCameraControl] {
         let parsed = raw.split(separator: ",").compactMap { LiveCameraControl(rawValue: $0.trimmingCharacters(in: .whitespaces)) }
         return parsed.isEmpty ? defaultOrder : parsed
+    }
+
+    /// Row label for the Customise-strip screen (SettingsView.LiveControlsCustomizeView) -- the strip
+    /// itself never shows this text, only icons, so it wasn't needed until that screen existed.
+    var label: String {
+        switch self {
+        case .lens: return "Lens"
+        case .zoom: return "Zoom"
+        case .exposure: return "Exposure"
+        case .torch: return "Torch"
+        case .whiteBalanceLock: return "White balance lock"
+        case .stabilization: return "Stabilisation"
+        case .mirror: return "Mirror"
+        }
     }
 }
 
@@ -354,6 +523,25 @@ extension CameraSettings {
         assert(LiveCameraControl.order(from: "zoom,bogus,torch") == [.zoom, .torch], "unknown tokens dropped")
         assert(LiveCameraControl.order(from: "") == LiveCameraControl.defaultOrder, "empty falls back to default")
         assert(LiveCameraControl.order(from: "nope,also-nope") == LiveCameraControl.defaultOrder, "all-unknown falls back to default")
+
+        // Customise screen round trip: a subset + reorder survives storage; the all-off case falls back
+        // to defaults rather than ever leaving the strip with nothing on it (see LiveControlsCustomizeView).
+        let customOrder: [LiveCameraControl] = [.torch, .zoom, .mirror]
+        assert(LiveCameraControl.order(from: customOrder.map(\.rawValue).joined(separator: ",")) == customOrder, "customise round trip: subset + reorder survives")
+        assert(LiveCameraControl.order(from: "") == LiveCameraControl.defaultOrder, "customise round trip: all-off falls back to defaults, never an empty strip")
+
+        // Pinch-to-zoom: base zoom (at gesture start) * MagnifyGesture.magnification, clamped -- the exact
+        // clamped() the zoom slider and CameraSettings.apply use, so pinch/slider/lens switch agree.
+        assert(clamped(2.0 * 1.5, min: 1, max: 5) == 3.0, "pinch: base*magnification within range")
+        assert(clamped(2.0 * 10, min: 1, max: 5) == 5.0, "pinch: magnification clamps to device max")
+        assert(clamped(2.0 * 0.1, min: 1, max: 5) == 1.0, "pinch: magnification clamps to device min")
+
+        // Lens zoom multipliers: derived from field-of-view ratios, not a per-model guess (see
+        // lensOptions()/fieldOfViewMultiplier()). Same FOV -> 1x; a narrower FOV -> a bigger multiplier.
+        assert(zoomMultiplier(wideFOVDegrees: 75, otherFOVDegrees: 75) == 1.0, "same FOV -> 1x")
+        assert(zoomMultiplier(wideFOVDegrees: 75, otherFOVDegrees: 35) > zoomMultiplier(wideFOVDegrees: 75, otherFOVDegrees: 50), "narrower FOV -> bigger multiplier")
+        assert(multiplierLabel(2.98) == "3", "rounds hardware noise to a clean whole number")
+        assert(multiplierLabel(0.52) == "0.5", "keeps a genuine half-step")
 
         print("CameraSettings.demo() ok")
     }
