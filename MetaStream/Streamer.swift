@@ -25,7 +25,10 @@ private final class Hot: @unchecked Sendable {
     var transcoder: Transcoder?         // non-nil = decode HEVC → H.264 encoder instead of passthrough
     var warm = false                    // decoder warming up before the RTMP connect
     var sent = 0                        // glasses frames handed to the RTMP path
-    var appended = 0                    // decoded frames handed to the mixer
+    var appended = 0                    // decoded frames handed to the mixer (IN)
+    var mixerOut = 0                    // composited frames the mixer actually emitted (OUT) -- see LayerSink below.
+                                         // appended climbing while this stalls is output starvation, not input starvation
+                                         // (this is the diagnostic that would have caught the offscreen-mode freeze without a device).
     var showMixerVideo = false          // preview shows mixer output (phone camera / black) instead of glasses frames
     weak var preview: AVSampleBufferDisplayLayer?
     // Outbound-pressure telemetry for the bitrate controller (acted on only while Streamer.phoneEncodes is
@@ -76,6 +79,7 @@ private final class LayerSink: MediaMixerOutput, @unchecked Sendable {
     var videoTrackId: UInt8? { UInt8.max }
     var audioTrackId: UInt8? { nil }
     func mixer(_ mixer: MediaMixer, didOutput sampleBuffer: CMSampleBuffer) {
+        hot.mixerOut += 1   // counted regardless of preview state -- this is the mixer's composited-output tap firing, full stop
         guard hot.showMixerVideo, let p = hot.preview else { return }
         if p.status == .failed { p.flush() }
         p.enqueue(sampleBuffer)
@@ -248,10 +252,17 @@ final class Streamer: ObservableObject {
             }
         }
 
-        func attach(to mixer: MediaMixer) async {
+        /// The underlying stream as a MediaMixerOutput -- both RTMPStream and SRTStream default their own
+        /// videoTrackId/audioTrackId to UInt8.max (checked HaishinKit 2.1.0/2.2.5 source: HaishinKit's own
+        /// MTHKView/PiPHKView preview views do too, alongside a stream, as the documented way to tap the
+        /// mixer's composited output from more than one place -- addOutput/removeOutput just append/remove
+        /// from a plain array and every dispatch site loops `for output in outputs where videoTrackId == ...`,
+        /// so registering this next to LayerSink is not a collision). Used by wireMixer() below to swap which
+        /// stream is registered when goLive() rebuilds `uplink` for a new session.
+        var output: any MediaMixerOutput {
             switch self {
-            case .rtmp(_, let st): await mixer.addOutput(st)
-            case .srt(_, let st): await mixer.addOutput(st)
+            case .rtmp(_, let st): return st
+            case .srt(_, let st): return st
             }
         }
 
@@ -327,12 +338,35 @@ final class Streamer: ObservableObject {
     private var uplink = Uplink.make(for: "rtmp://")
     private let mixer = MediaMixer()
     private var mixerWired = false
+    /// Whichever uplink's stream is currently registered as a mixer output, so a later goLive() can swap it
+    /// out. FOUND BUG: `mixer.addOutput(uplink.output)` used to run only on the very first wireMixer() call
+    /// ever (guarded by mixerWired alone) -- goLive() rebuilds `uplink` into a brand-new RTMPStream/SRTStream
+    /// every session, but nothing ever added THAT one as a mixer output once mixerWired had already latched
+    /// true from an earlier session (or from evaluateSource()'s auto phone-camera fallback at launch, which
+    /// also calls wireMixer()). The mixer kept feeding the FIRST session's now-closed, orphaned stream while
+    /// every later session connected, published, and sat there receiving zero frames of either kind -- a
+    /// stream with no track at all, which is exactly "connected, publishing, channel stayed offline" with no
+    /// device-report codec/track-config error to explain it. This is what actually explains that report; a
+    /// shared UInt8.max videoTrackId with LayerSink (checked directly above) was considered and ruled out --
+    /// HaishinKit's own dispatch is a plain array loop with no exclusivity, and its own preview views use the
+    /// identical pattern deliberately.
+    private var wiredUplinkOutput: (any MediaMixerOutput)?
 
-    /// Phone-camera frames flow mixer → encoder → RTMP stream (and → preview view). Wired once, on first need.
+    /// Phone-camera frames flow mixer → encoder → RTMP stream (and → preview view). sink/startRunning() are
+    /// wired once, on first need (HaishinKit's own startRunning() no-ops on a repeat call regardless -- checked
+    /// both tags); the uplink's own stream is re-registered every call whenever `uplink` itself has changed.
     private func wireMixer() async {
+        if wiredUplinkOutput !== uplink.output {
+            if let old = wiredUplinkOutput { await mixer.removeOutput(old) }
+            await mixer.addOutput(uplink.output)
+            wiredUplinkOutput = uplink.output
+            // mixerOut (see Hot/LayerSink) alone can't catch a repeat of the bug above: LayerSink is wired
+            // once and stays wired regardless, so it keeps counting normally even in a session whose uplink
+            // stream was never registered. This line is what makes THAT specific failure grep-able per session.
+            applog("stream", "mixer output wired to current uplink stream")
+        }
         guard !mixerWired else { return }
         mixerWired = true
-        await uplink.attach(to: mixer)
         await mixer.addOutput(sink)
         await mixer.startRunning()
     }
@@ -372,7 +406,7 @@ final class Streamer: ObservableObject {
                 self.checkBlurStall()
                 if self.live, tick % 5 == 0 {
                     let mode = self.hot.transcoder == nil ? "hevc-passthrough" : "h264-transcode"
-                    applog("stream", "stats source=\(self.source) \(mode) glassesFps=\(self.fps) glassesKbps=\(self.kbps) sent=\(self.hot.sent) decoded=\(self.hot.transcoder?.decoded ?? 0) appended=\(self.hot.appended)")
+                    applog("stream", "stats source=\(self.source) \(mode) glassesFps=\(self.fps) glassesKbps=\(self.kbps) sent=\(self.hot.sent) decoded=\(self.hot.transcoder?.decoded ?? 0) appended=\(self.hot.appended) mixerOut=\(self.hot.mixerOut)")
                 }
             }
         }
@@ -642,6 +676,49 @@ final class Streamer: ObservableObject {
         }
     }
 
+    /// Rewrites a decoded glasses frame's timestamp onto the phone's own host clock before it reaches the
+    /// mixer -- fixes the blur+glasses freeze (appended kept climbing, nothing came out; see mixerOut above).
+    ///
+    /// Checked directly in HaishinKit 2.1.0 and 2.2.5 source (Mixer/MediaMixer.swift, Screen/Screen.swift):
+    /// mixer.append() always reaches Screen.append() -- track input is fed into Screen unconditionally in
+    /// 2.1.0, and gated only on videoMixerSettings.mode == .offscreen (which blur sets) in 2.2.5, not on the
+    /// source of the frame -- so glasses frames DO arrive at the screen either way. What actually renders
+    /// them out, though, is a private displayLink loop MediaMixer starts itself: setVideoMixerSettings(_:)
+    /// calls its own private setVideoRenderingMode(mode) whenever mode changes (also once from
+    /// startRunning()), which is exactly what syncBlurEffect() below already triggers by flipping
+    /// videoMixerSettings.mode to .offscreen -- there is no public setVideoRenderingMode to call ourselves,
+    /// and the mixer already calls it. That part of a prior hypothesis for this bug does not hold up against
+    /// the source and was not the fix applied here.
+    ///
+    /// What that private loop's Screen.makeSampleBuffer does, every displayLink tick, is reject any frame
+    /// whose computed presentationTimeStamp doesn't advance past the last one it rendered -- and it computes
+    /// that from the offscreen canvas's own track's sample buffer PTS compared against the displayLink's
+    /// host-clock timestamp (Screen's videoCaptureLatency/targetTimestamp bookkeeping). The phone camera's
+    /// CMSampleBuffers are already host-clock timestamped by AVFoundation, so that comparison is sound and
+    /// blur-while-on-phone-camera renders fine (per the report: front/back camera both produce output, only
+    /// back camera's fps is the separate, expected Vision-cost issue below). The glasses' CMSampleBuffers
+    /// come from Meta's Wearables SDK over Bluetooth with no documented guarantee their PTS is on that same
+    /// clock -- MWDATCamera is closed-source, so this is the one link in the chain not directly verifiable --
+    /// and Transcoder.decode() (see Transcoder.swift, not touched here) carries that original PTS straight
+    /// through the decode. A source clock that doesn't line up with the displayLink's would make the
+    /// monotonic-PTS guard fail forever once it drifts behind, which matches "appended climbs, nothing comes
+    /// out" exactly and explains why only the glasses path (not the phone camera, same offscreen renderer)
+    /// freezes. Stamping "now" on the host clock here -- the same clock the black-frame generator below
+    /// already uses, and the one AVFoundation already uses for the phone camera -- makes every source the
+    /// mixer ever sees carry a PTS in that one clock domain, which is what the renderer's guard assumes.
+    /// nonisolated: called synchronously from Transcoder's @Sendable sink closure (VTDecompressionSession's
+    /// callback thread, not the main actor) -- a plain (implicitly MainActor) static func here would not
+    /// compile without an await it cannot afford on that thread.
+    nonisolated private static func retimestamped(_ sb: CMSampleBuffer) -> CMSampleBuffer? {
+        guard let imageBuffer = sb.imageBuffer, let fd = sb.formatDescription else { return nil }
+        var timing = CMSampleTimingInfo(duration: sb.duration,
+                                        presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                                        decodeTimeStamp: .invalid)
+        var out: CMSampleBuffer?
+        CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: imageBuffer, formatDescription: fd, sampleTiming: &timing, sampleBufferOut: &out)
+        return out
+    }
+
     private static func blackPixelBuffer() -> CVPixelBuffer? {
         var pb: CVPixelBuffer?
         CVPixelBufferCreate(nil, 720, 1280, kCVPixelFormatType_32BGRA,
@@ -673,7 +750,10 @@ final class Streamer: ObservableObject {
         let url = Self.withSRTLatency(url, ms: srtLatencyMs)
         uplink = Uplink.make(for: url)
         applog("stream", "uplink = \(uplink.isSRT ? "srt" : "rtmp")")
-        self.fallbackPosition = fallbackPosition
+        // An explicit camera pick from the source picker outranks the Settings fallback preference:
+        // that setting only says which camera to fall back TO when the glasses drop, so applying it
+        // here was silently flipping a deliberate "back camera" choice to front on GO LIVE.
+        if manualSource != "back", manualSource != "front" { self.fallbackPosition = fallbackPosition }
         let h264 = codec == "h264"
         // ponytail: adaptive bitrate's real gate is phoneEncodes ("is the phone doing the encoding"), not
         // codec == h264 — h264 always means the phone encodes, but so does hevc with the phone camera
@@ -706,6 +786,7 @@ final class Streamer: ObservableObject {
             hot.transcoder = Transcoder { sb in
                 guard hot.live else { return }
                 hot.appended += 1
+                guard let sb = Self.retimestamped(sb) else { return }
                 Task { await mixer.append(sb) }
             }
         } else {
@@ -736,8 +817,13 @@ final class Streamer: ObservableObject {
                 // profileLevel containing "HEVC" flips HaishinKit's internal format to .hevc (onMetaData codec id);
                 // the encoder handles phone-camera video, black frames and, in H.264 mode, the decoded glasses frames.
                 // Geometry is fixed for the session: changing frame size mid-stream breaks players.
-                // Glasses dictate 720x1280 at 30; the phone camera uses whatever the user configured.
-                let onPhone = manualSource == "back" || manualSource == "front"
+                // Glasses dictate 720x1280 at 30; the phone camera uses whatever the user configured. Gate on the
+                // ACTUAL active source (`source`), not the manual preference (`manualSource`): "auto" can already
+                // be sitting on the phone camera (glasses not streaming yet, or already fell back) by the time GO
+                // LIVE is pressed, and manualSource == "auto" doesn't say which -- gating on manualSource silently
+                // locked an auto-fallback phone session into glasses' 720x1280@30 and dropped the user's configured
+                // quality (1080p60, say) any time the source pill read auto.
+                let onPhone = source == "phone"
                 let size = onPhone ? phoneQuality.size : Self.glassesSize
                 let rate = onPhone ? phoneQuality.fps : 30
                 sessionVideoSize = size
@@ -755,14 +841,24 @@ final class Streamer: ObservableObject {
                     vm.mainTrack = 0                       // track 0 straight through to the encoder
                     await mixer.setVideoMixerSettings(vm)
                     await syncBlurEffect()                 // registers blur + switches to .offscreen if already enabled
-                    // Decode before connecting: an ingest that finds no video in its first seconds of probing
-                    // treats the whole session as audio-only. Warm up, then connect with frames already flowing.
                     hot.warm = true
                     syncHot()                              // glasses+blur: preview switches to the (blurred) mixer output now that decode is starting
-                    rtmpState = "syncing decoder…"
-                    var waited = 0
-                    while hot.transcoder?.decoded == 0, waited < 80 { try await Task.sleep(for: .milliseconds(100)); waited += 1 }
-                    applog("stream", "decoder warm after \(waited * 100) ms, decoded=\(hot.transcoder?.decoded ?? 0)")
+                    if onPhone {
+                        // The transcoder only ever decodes GLASSES frames (see the videoFramePublisher
+                        // listener in startGlasses(), the only place that calls Transcoder.decode()) -- with
+                        // the phone camera driving video there is nothing to warm up and hot.transcoder.decoded
+                        // can never leave 0, so this used to burn the full 8s ceiling below on every
+                        // phone-camera h264 session for nothing, delaying GO LIVE by that much every time.
+                        applog("stream", "phone camera driving video -- skipping decoder warm-up")
+                    } else {
+                        // Decode before connecting: an ingest that finds no video in its first seconds of
+                        // probing treats the whole session as audio-only. Warm up, then connect with frames
+                        // already flowing.
+                        rtmpState = "syncing decoder…"
+                        var waited = 0
+                        while hot.transcoder?.decoded == 0, waited < 80 { try await Task.sleep(for: .milliseconds(100)); waited += 1 }
+                        applog("stream", "decoder warm after \(waited * 100) ms, decoded=\(hot.transcoder?.decoded ?? 0)")
+                    }
                 }
                 await uplink.setAudioSettings(AudioCodecSettings(bitRate: 96_000))
 
@@ -830,11 +926,14 @@ final class Streamer: ObservableObject {
     ///
     /// registerVideoEffect hooks mixer.screen (HaishinKit's offscreen render object, track 0 by default) --
     /// checked HaishinKit 2.1.0 and 2.2.5 source directly: that's the one place phone camera, black frames
-    /// and (in H.264 mode) decoded glasses frames all pass through, since every mixer.append/attachVideo call
-    /// feeds it regardless of mode. Effects only run while the mixer is in .offscreen mode, though --
-    /// .passthrough skips Screen/VideoTrackScreenObject rendering entirely and forwards raw buffers straight
-    /// to the encoder, which is why blur silently did nothing before this. Offscreen costs more (an extra
-    /// render pass), so it's only switched on while blur is actually enabled.
+    /// and (in H.264 mode) decoded glasses frames all pass through once the mixer is in .offscreen mode --
+    /// 2.1.0 feeds Screen from every mixer.append/attachVideo call unconditionally, 2.2.5 gates that same
+    /// feed on videoMixerSettings.mode already being .offscreen (checked both directly; this call always sets
+    /// mode before frames need to arrive, so the ordering holds either way). .passthrough skips
+    /// Screen/VideoTrackScreenObject rendering entirely and forwards raw buffers straight to the encoder,
+    /// which is why blur silently did nothing before this. Offscreen costs more (an extra render pass), so
+    /// it's only switched on while blur is actually enabled. See retimestamped() near blackPixelBuffer()
+    /// above for the offscreen-mode freeze this uncovered on the glasses path specifically, and what fixed it.
     /// `Screen` lives on HaishinKit's own global actor, so its size can't be assigned from the main actor.
     /// What the offscreen canvas should be right now: the session's fixed geometry while live, otherwise
     /// whatever the phone camera is configured to produce, since that is the only thing the mixer renders
