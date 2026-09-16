@@ -235,7 +235,7 @@ struct ContentView: View {
             }
             .padding(.horizontal)
 
-            if streamer.registration != "registered" { registerCard }
+            if Streamer.glassesConfigured, streamer.registration != "registered" { registerCard }
 
             if photoFlash {
                 Color.white.ignoresSafeArea().transition(.opacity)
@@ -299,10 +299,12 @@ struct ContentView: View {
     private var hud: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                Button { showStatus = true } label: {
-                    pill("eyeglasses", streamer.glassesShort, glassesColor)
+                if Streamer.glassesConfigured {
+                    Button { showStatus = true } label: {
+                        pill("eyeglasses", streamer.glassesShort, glassesColor)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
                 if streamer.live {
                     TimelineView(.periodic(from: .now, by: 1)) { ctx in
@@ -440,9 +442,11 @@ struct ContentView: View {
 
     private var controls: some View {
         HStack(alignment: .center, spacing: 18) {
-            roundButton(streamer.glassesOn ? "eyeglasses" : "eyeglasses.slash", filled: streamer.glassesOn) {
-                tap()
-                streamer.glassesOn ? streamer.stopGlasses() : streamer.startGlasses(resolution: resolution, fps: UInt(fpsSetting))
+            if Streamer.glassesConfigured {
+                roundButton(streamer.glassesOn ? "eyeglasses" : "eyeglasses.slash", filled: streamer.glassesOn) {
+                    tap()
+                    streamer.glassesOn ? streamer.stopGlasses() : streamer.startGlasses(resolution: resolution, fps: UInt(fpsSetting))
+                }
             }
             // A picker, not a cycler: hunting for the right source by tapping through four states is
             // the wrong interaction when the shot is already wrong on stream.
@@ -450,7 +454,9 @@ struct ContentView: View {
                 Picker("Video source", selection: Binding(get: { streamer.manualSource },
                                                           set: { tap(); streamer.setSource($0) })) {
                     Label("Auto", systemImage: "wand.and.stars").tag("auto")
-                    Label("Glasses", systemImage: "eyeglasses").tag("glasses")
+                    if Streamer.glassesConfigured {
+                        Label("Glasses", systemImage: "eyeglasses").tag("glasses")
+                    }
                     Label("Back camera", systemImage: "camera.fill").tag("back")
                     Label("Front camera", systemImage: "camera.rotate.fill").tag("front")
                 }
