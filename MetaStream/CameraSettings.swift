@@ -174,10 +174,10 @@ extension CameraSettings {
     /// size), not an iPhone-specific fact, so this works for any device pair without a per-model table.
     private static func fieldOfViewMultiplier(of lens: CameraLens, position: AVCaptureDevice.Position) -> Double? {
         guard lens != .wide,
-              let wide = device(lens: "wide", position: position), wide.videoFieldOfView > 0,
-              let other = device(lens: lens.rawValue, position: position), other.videoFieldOfView > 0
+              let wide = device(lens: "wide", position: position), wide.activeFormat.videoFieldOfView > 0,
+              let other = device(lens: lens.rawValue, position: position), other.activeFormat.videoFieldOfView > 0
         else { return nil }
-        return zoomMultiplier(wideFOVDegrees: Double(wide.videoFieldOfView), otherFOVDegrees: Double(other.videoFieldOfView))
+        return zoomMultiplier(wideFOVDegrees: Double(wide.activeFormat.videoFieldOfView), otherFOVDegrees: Double(other.activeFormat.videoFieldOfView))
     }
 
     /// Pure trig half of fieldOfViewMultiplier -- exercised directly in Self.demo() without any device.
